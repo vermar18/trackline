@@ -128,6 +128,14 @@ export function createRequestHandler(db, { origin } = {}) {
       if (method !== 'GET' && (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] || '') ||
         !auth.sameOrigin(request))) bad('A same-origin JSON request is required.', 415)
       const value = method === 'GET' ? undefined : await readJSON(request)
+      if (method === 'GET' && pathname === '/api/health') {
+        try {
+          await db.one('SELECT 1')
+          return send(200, { status: 'healthy', database: 'connected' })
+        } catch (dbError) {
+          return send(500, { status: 'error', database: 'unreachable', message: dbError.message || dbError.code })
+        }
+      }
       if (method === 'POST' && pathname === '/api/session') return send(200, await auth.login(request, response, value))
       if (method === 'DELETE' && pathname === '/api/session') {
         await auth.logout(request, response)
@@ -265,8 +273,8 @@ export function createRequestHandler(db, { origin } = {}) {
       }
       bad('Method not supported.', 405)
     } catch (error) {
-      if (!error.status) console.error('Trackline request failed:', error.code || error.name)
-      send(error.status || 500, { error: error.status ? error.message : 'The tracker could not complete this request.' })
+      if (!error.status) console.error('Trackline request failed:', error.code || error.name, error.message)
+      send(error.status || 500, { error: error.status ? error.message : (error.code ? `Database connection failed (${error.code}).` : (error.message || 'The tracker could not complete this request.')) })
     }
   }
 }

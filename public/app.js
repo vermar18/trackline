@@ -678,7 +678,7 @@ window.addEventListener('hashchange', readRoute)
 staticIcons()
 api('/api/session').then(showAccount).catch(error => {
   if (error.status === 401) showAccount()
-  else $('#auth-status').textContent = 'Unable to reach Trackline. Reload the page to try again.'
+  else $('#auth-status').textContent = error.message || 'Unable to reach Trackline. Reload the page to try again.'
 })
 setInterval(() => {
   if (session && !$('#workspace').hidden && !document.hidden) {
