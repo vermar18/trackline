@@ -1,0 +1,99 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../generated/prisma"
+  importFileExtension = "ts"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+enum UserRole {
+  admin
+  member
+}
+
+model Item {
+  id          Int    @id @default(autoincrement()) @db.UnsignedInt
+  title       String @db.VarChar(180)
+  type        String @db.VarChar(16)
+  project     String @db.VarChar(180)
+  owner       String @db.VarChar(180)
+  status      String @db.VarChar(16)
+  priority    String @db.VarChar(16)
+  due         String @db.VarChar(10)
+  description String @db.Text
+  resolution  String @db.Text
+  created     String @db.Char(24)
+  updated     String @db.Char(24)
+  version     Int         @default(1) @db.UnsignedInt
+  events      Event[]
+  images      ItemImage[]
+
+  @@index([updated, id], map: "items_updated")
+  @@map("items")
+}
+
+model ItemImage {
+  id        Int    @id @default(autoincrement()) @db.UnsignedInt
+  item_id   Int    @db.UnsignedInt
+  filename  String @db.VarChar(255)
+  mime_type String @db.VarChar(100)
+  size      Int    @db.UnsignedInt
+  data      Bytes  @db.MediumBlob
+  created   String @db.Char(24)
+  item      Item   @relation(fields: [item_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "item_images_ibfk_1")
+
+  @@index([item_id, id], map: "item_images_item")
+  @@map("item_images")
+}
+
+model Event {
+  id      Int    @id @default(autoincrement()) @db.UnsignedInt
+  item_id Int    @db.UnsignedInt
+  kind    String @db.VarChar(16)
+  actor   String @db.VarChar(180)
+  body    String @db.MediumText
+  minutes Int    @default(0) @db.UnsignedInt
+  at      String @db.Char(24)
+  item    Item   @relation(fields: [item_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "events_ibfk_1")
+
+  @@index([item_id, id], map: "events_item")
+  @@index([at, id], map: "events_recent")
+  @@map("events")
+}
+
+model User {
+  username      String    @id @db.VarChar(64)
+  name          String    @db.VarChar(100)
+  role          UserRole
+  salt          String    @db.Char(32)
+  password_hash String    @db.Char(128)
+  must_change   Boolean   @default(false)
+  /// MySQL generates this value from role. The SQL migration owns the expression.
+  admin_slot    Int?      @unique(map: "one_super_admin") @db.TinyInt
+  sessions      Session[]
+
+  @@map("users")
+}
+
+model Session {
+  hash     String @id @db.Char(64)
+  username String @db.VarChar(64)
+  expires  BigInt @db.UnsignedBigInt
+  user     User   @relation(fields: [username], references: [username], onDelete: NoAction, onUpdate: NoAction, map: "sessions_ibfk_1")
+
+  @@index([username], map: "username")
+  @@index([expires], map: "sessions_expiry")
+  @@map("sessions")
+}
+
+model LoginAttempt {
+  attempt_key String @db.VarChar(80)
+  bucket      BigInt @db.UnsignedBigInt
+  attempts    Int    @db.UnsignedInt
+
+  @@id([attempt_key, bucket])
+  @@index([bucket], map: "attempts_expiry")
+  @@map("login_attempts")
+}

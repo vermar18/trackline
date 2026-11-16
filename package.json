@@ -1,0 +1,27 @@
+{
+  "name": "trackline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "init-admin": "node --env-file-if-exists=.env server.mjs --init-admin",
+    "db:generate": "prisma generate",
+    "db:deploy": "prisma migrate deploy",
+    "build": "npm run db:generate && node --check server.mjs && node --check auth.mjs && node --check database.mjs && node --check amplify-server.mjs && node --check build-amplify.mjs && node --check public/app.js",
+    "pretest": "npm run db:generate",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1169.0",
+    "@prisma/adapter-mariadb": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "aws-ssl-profiles": "^1.1.2"
+  },
+  "devDependencies": {
+    "prisma": "^7.10.1"
+  }
+}

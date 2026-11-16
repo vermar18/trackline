@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#191a2b">
+  <title>Trackline — Project workspace</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main class="auth-page" id="auth-page" aria-label="Trackline account">
+    <div class="auth-card">
+      <div class="auth-brand"><span class="brand-mark" data-icon="layers"></span>Trackline</div>
+      <p id="auth-status" role="status">Checking your session…</p>
+      <form id="login-form" class="auth-form" method="post" hidden>
+        <h1>Sign in</h1><p>Use the account created by your workspace admin.</p>
+        <label>Username<input name="username" autocomplete="username" maxlength="64" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+        <p class="form-error" role="alert"></p><button class="button primary">Sign in</button>
+      </form>
+      <form id="password-form" class="auth-form" method="post" hidden>
+        <h1>Change password</h1><p id="password-context"></p>
+        <label>Current password<input name="currentPassword" type="password" autocomplete="current-password" maxlength="128" required></label>
+        <label>New password<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+        <label>Confirm new password<input name="confirmation" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+        <p class="form-error" role="alert"></p><button class="button primary">Save password</button>
+        <button type="button" class="text-button" id="password-cancel" data-action="cancel-password">Back to workspace</button>
+        <button type="button" class="text-button" data-action="logout">Sign out</button>
+      </form>
+    </div>
+  </main>
+  <div class="shell" id="workspace" hidden>
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="#overview"><span class="brand-mark" data-icon="layers"></span><span>Trackline<small>PROJECT WORKSPACE</small></span></a>
+      <nav>
+        <p class="nav-label">WORKSPACE</p>
+        <div id="workspace-nav"></div>
+        <p class="nav-label project-label">PROJECTS</p>
+        <div id="project-nav"></div>
+      </nav>
+      <div class="sidebar-bottom">
+        <button class="nav-item" data-action="import"><span data-icon="upload"></span>Import from CSV</button>
+        <button class="nav-item" data-action="password"><span data-icon="lock"></span>Change password</button>
+        <button class="nav-item" data-action="logout"><span data-icon="logout"></span>Sign out</button>
+        <div class="profile"><span class="avatar" id="profile-avatar"></span><div><b id="profile-name"></b><small id="profile-context"></small></div></div>
+      </div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="menu" aria-label="Open navigation" aria-expanded="false"><span data-icon="menu"></span></button>
+        <div class="breadcrumb"><span>Workspace</span><span data-icon="chevron"></span><b id="crumb">Overview</b></div>
+        <div class="top-actions">
+          <label class="search"><span data-icon="search"></span><input type="search" id="search" placeholder="Search work items..." aria-label="Search work items"><kbd>/</kbd></label>
+          <button class="button primary" data-action="create"><span data-icon="plus"></span><span>New item</span></button>
+        </div>
+      </header>
+      <main id="main" aria-busy="true"><div class="loading">Loading workspace…</div></main>
+    </div>
+  </div>
+  <dialog id="item-dialog" class="drawer" aria-labelledby="item-dialog-title"></dialog>
+  <dialog id="import-dialog" class="modal" aria-labelledby="import-title">
+    <form id="import-form">
+      <div class="dialog-head"><div><h2 id="import-title">Import work items</h2><p>Upload a CSV saved from Excel to bring existing work into Trackline.</p></div><button type="button" class="icon-button" data-action="close" aria-label="Close"><span data-icon="x"></span></button></div>
+      <label class="upload-box"><span data-icon="upload"></span><strong>Choose a CSV file</strong><input type="file" id="csv-file" accept=".csv,text/csv" required></label>
+      <p class="hint">Required columns are Title and Project. Optional columns are Type, Owner, Status, Priority, Due, Description, and Resolution. Use YYYY-MM-DD for due dates.</p>
+      <button type="button" class="text-button" data-action="template">Download CSV template</button>
+      <p class="form-error" id="import-error" role="alert"></p>
+      <div class="dialog-foot"><button type="button" class="button secondary" data-action="close">Cancel</button><button class="button primary">Import items</button></div>
+    </form>
+  </dialog>
+  <dialog class="modal" id="reset-dialog" aria-labelledby="reset-title">
+    <form id="reset-form" method="post">
+      <div class="dialog-head"><div><h2 id="reset-title">Reset member password</h2><p id="reset-context"></p></div><button type="button" class="icon-button" data-action="close" aria-label="Close"><span data-icon="x"></span></button></div>
+      <div class="fields"><label class="wide">Temporary password<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label></div>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-foot"><button type="button" class="button secondary" data-action="close">Cancel</button><button class="button primary">Reset password</button></div>
+    </form>
+  </dialog>
+  <dialog id="image-lightbox" class="lightbox-modal" aria-labelledby="lightbox-title">
+    <div class="lightbox-content">
+      <div class="lightbox-head">
+        <span id="lightbox-title" class="lightbox-title"></span>
+        <div class="lightbox-actions">
+          <a id="lightbox-download" class="button secondary" download target="_blank" rel="noopener">Download</a>
+          <button type="button" class="icon-button" data-action="close" aria-label="Close"><span data-icon="x"></span></button>
+        </div>
+      </div>
+      <div class="lightbox-body">
+        <img id="lightbox-img" alt="Work item image preview">
+      </div>
+    </div>
+  </dialog>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

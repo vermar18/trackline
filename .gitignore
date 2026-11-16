@@ -1,0 +1,7 @@
+data/
+node_modules/
+dist/
+.amplify-hosting/
+generated/
+.env
+.env.*
