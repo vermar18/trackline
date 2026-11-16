@@ -3,6 +3,7 @@ frontend:
   phases:
     preBuild:
       commands:
+        - rm -f "$NVM_DIR/default-packages" /root/.nvm/default-packages ~/.nvm/default-packages 2>/dev/null || true
         - nvm install 24
         - nvm use 24
         - npm ci --include=dev
