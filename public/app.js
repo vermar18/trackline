@@ -337,13 +337,15 @@ function fillDrawer(item, redraw = false) {
   const draftImages = item._draftImages ? [...item._draftImages] : []
   const removedImageIds = item._removedImageIds ? [...item._removedImageIds] : []
   const projectChoices = [...new Set([...projects(), ...(existing ? [item.project] : [])])]
+  const assigneeChoices = [...new Set([...workspace.members, item.owner].filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
   dialog.innerHTML = `<div class="dialog-head"><div><h2 id="item-dialog-title">${existing ? esc(item.title) : 'New work item'}</h2><p>${existing ? ref(item.id) + ' · ' + esc(item.project) : 'Track a feature, bug, fix, or task.'}</p></div><button class="icon-button" data-action="close" aria-label="Close">${icon('x')}</button></div>
     <form id="item-form"><div class="fields">
       ${formField('Title', 'title', item.title, 'maxlength="180" required autofocus')}
       <label>Project<select name="project" required><option value="">Select a project</option>${projectChoices.map(name => option(name, item.project)).join('')}</select>
       ${projectChoices.length ? '' : '<small>Ask a super admin to create a project first.</small>'}</label>
       ${picker('Type', 'type', types, item.type || 'Task')}
-      ${formField('Assignee', 'owner', item.owner, 'maxlength="180" list="owner-options" placeholder="Unassigned"')}
+      <label>Assignee<select name="owner">${option('', item.owner || '', 'Unassigned')}${assigneeChoices.map(name => option(name, item.owner)).join('')}</select></label>
       ${picker('Status', 'status', statuses, item.status || 'To do')}
       ${picker('Priority', 'priority', priorities, item.priority || 'Medium')}
       ${formField('Due date', 'due', item.due, 'type="date"')}
@@ -362,7 +364,6 @@ function fillDrawer(item, redraw = false) {
         </div>
       </div>
       <label class="wide">Resolution<textarea name="resolution" maxlength="10000" placeholder="Record what changed and how it was verified">${esc(item.resolution)}</textarea></label>
-      <datalist id="owner-options">${owners().map(value => option(value)).join('')}</datalist>
     </div><p class="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="button secondary" data-action="close">${existing ? 'Close' : 'Cancel'}</button><button class="button primary">${existing ? 'Save changes' : 'Create item'}</button></div></form>
     ${existing ? timeline(item) : ''}`
   const form = $('#item-form')
