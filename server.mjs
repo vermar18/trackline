@@ -92,6 +92,9 @@ async function readJSON(request) {
 
 export function createRequestHandler(db, { origin } = {}) {
   const now = () => new Date().toISOString()
+  const requireProject = async (connection, name) =>
+    (await connection.one('SELECT name FROM projects WHERE name=?', [name]))?.name ??
+      bad('Select an existing project. Ask your super admin to create it if needed.')
   const log = (connection, id, kind, actor, body, minutes = 0, at = now()) =>
     connection.execute('INSERT INTO events(item_id,kind,actor,body,minutes,at) VALUES(?,?,?,?,?,?)', [id, kind, actor, body, minutes, at])
   const add = async (connection, item, actor, kind = 'Created', at = now()) => {
@@ -174,18 +177,34 @@ export function createRequestHandler(db, { origin } = {}) {
         bad('Page not found.', 404)
       }
       const actor = user.name === user.username ? user.name : `${user.name} (@${user.username})`
+      if (method === 'POST' && pathname === '/api/projects') {
+        if (user.role !== 'admin') bad('Super admin access is required.', 403)
+        const name = field(value?.name, 180)
+        if (!name) bad('Enter a project name.')
+        try {
+          await db.project.create({ data: { name } })
+        } catch (error) {
+          if (error.code === 'P2002') {
+            bad('A project with that name already exists.', 409)
+          }
+          throw error
+        }
+        return send(201, { name })
+      }
       if (method === 'GET' && pathname === '/api/workspace') {
-        const [items, activity, members] = await Promise.all([
+        const [items, activity, members, projects] = await Promise.all([
           db.query('SELECT * FROM items ORDER BY updated DESC,id DESC'),
           db.query('SELECT events.*, items.title FROM events JOIN items ON items.id=events.item_id ORDER BY at DESC, events.id DESC LIMIT 100'),
           auth.members(),
+          db.query('SELECT name FROM projects ORDER BY name'),
         ])
-        return send(200, { items, activity, members })
+        return send(200, { items, activity, members, projects: projects.map(project => project.name) })
       }
       if (method === 'POST' && pathname === '/api/items') {
         const item = itemFields(value)
         const images = parseImages(value?.images)
         return send(201, await db.transaction(async connection => {
+          item.project = await requireProject(connection, item.project)
           const at = now()
           const id = await add(connection, item, actor, 'Created', at)
           if (images.length) await saveImages(connection, id, images, at)
@@ -199,7 +218,17 @@ export function createRequestHandler(db, { origin } = {}) {
           try { return itemFields(row) } catch (error) { bad(`Record ${index + 1}: ${error.message}`) }
         })
         return send(201, await db.transaction(async connection => {
-          for (const item of items) await add(connection, item, actor, 'Imported')
+          const projects = new Map()
+          for (const [index, item] of items.entries()) {
+            try {
+              if (!projects.has(item.project)) projects.set(item.project, await requireProject(connection, item.project))
+              item.project = projects.get(item.project)
+            } catch (error) {
+              if (error.status) bad(`Record ${index + 1}: ${error.message}`)
+              throw error
+            }
+            await add(connection, item, actor, 'Imported')
+          }
           return { count: items.length }
         }))
       }
@@ -215,19 +244,23 @@ export function createRequestHandler(db, { origin } = {}) {
           return detail(connection, itemId)
         }))
       }
-      const match = /^\/api\/items\/(\d+)(\/events)?$/.exec(pathname)
+      const match = /^\/api\/items\/(\d+)(\/events|\/status)?$/.exec(pathname)
       if (!match) bad('Page not found.', 404)
       const id = Number(match[1])
       if (!Number.isSafeInteger(id) || id > 4294967295) bad('Work item not found.', 404)
       if (method === 'GET' && !match[2]) return send(200, await db.transaction(connection => detail(connection, id)))
-      if (method === 'PATCH' && !match[2]) {
+      if (method === 'PATCH' && match[2] !== '/events') {
         return send(200, await db.transaction(async connection => {
           const current = await get(connection, id, true)
-          const item = itemFields(value)
-          if (value.version !== current.version) bad('This item changed since you opened it. Copy any unsaved edits, then reopen it.', 409)
+          if (value?.version !== current.version) bad('This item changed since you opened it. Refresh or reopen it before trying again.', 409)
+          const statusOnly = match[2] === '/status'
+          if (statusOnly && !statuses.includes(value.status)) bad('Choose a valid status.')
+          if (statusOnly && value.status === 'Done' && !current.resolution.trim()) bad('Add a resolution before marking this item done.')
+          const item = statusOnly ? { ...current, status: value.status } : itemFields(value)
+          if (item.project !== current.project) item.project = await requireProject(connection, item.project)
           const changed = columns.filter(key => current[key] !== item[key])
           let imagesChanged = false
-          if (Array.isArray(value?.removedImageIds) && value.removedImageIds.length) {
+          if (!statusOnly && Array.isArray(value?.removedImageIds) && value.removedImageIds.length) {
             for (const imgId of value.removedImageIds.map(Number)) {
               if (Number.isSafeInteger(imgId) && imgId > 0) {
                 await connection.execute('DELETE FROM item_images WHERE id=? AND item_id=?', [imgId, id])
@@ -235,7 +268,7 @@ export function createRequestHandler(db, { origin } = {}) {
               }
             }
           }
-          const rawImages = value?.newImages || (Array.isArray(value?.images) && value.images.some(img => img?.data) ? value.images.filter(img => img?.data) : undefined)
+          const rawImages = statusOnly ? undefined : value?.newImages || (Array.isArray(value?.images) && value.images.some(img => img?.data) ? value.images.filter(img => img?.data) : undefined)
           const newImages = parseImages(rawImages)
           if (newImages.length) {
             await saveImages(connection, id, newImages, now())
@@ -257,7 +290,7 @@ export function createRequestHandler(db, { origin } = {}) {
           return detail(connection, id)
         }))
       }
-      if (method === 'POST' && match[2]) {
+      if (method === 'POST' && match[2] === '/events') {
         const body = field(value?.body)
         const kind = value?.kind
         const minutes = kind === 'Work log' ? value.minutes : 0

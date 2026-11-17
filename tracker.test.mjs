@@ -30,10 +30,11 @@ async function testDatabase(t) {
   return { ...config, database }
 }
 
-async function start(config, { seed = true, signIn = true, publicOrigin } = {}) {
+async function start(config, { seed = true, signIn = true, publicOrigin, projectNames = ['Billing', 'Platform', 'Design'] } = {}) {
   const db = connectDatabase(config)
   if (seed) {
     await createAuth(db).initializeAdmin(admin)
+    await db.project.createMany({ data: projectNames.map(name => ({ name })) })
   }
   const server = createServer(createRequestHandler(db, { origin: publicOrigin }))
   server.listen(0, '127.0.0.1')
@@ -143,6 +144,7 @@ test('a single super admin provisions team accounts and members must replace tem
   assert.equal((await member.request('/api/session', 'GET', undefined, { cookie: firstSession })).status, 401)
   assert.equal((await member.request('/api/users')).status, 403)
   assert.equal((await member.request('/api/users', 'POST', teammate)).status, 403)
+  assert.equal((await member.request('/api/projects', 'POST', { name: 'Another project' })).status, 403)
   const created = await member.request('/api/items', 'POST', { title: 'Test', project: 'Billing' })
   assert.equal(created.status, 201)
   assert.equal(created.data.events[0].actor, 'QA Member (@qa-member)')
@@ -154,6 +156,31 @@ test('a single super admin provisions team accounts and members must replace tem
   assert.equal((await member.request('/api/session', 'POST', teammate)).data.mustChangePassword, true)
   assert.equal((await app.request('/api/session', 'DELETE', {})).status, 200)
   assert.equal((await app.request('/api/workspace')).status, 401)
+})
+
+test('projects are managed centrally and board status moves preserve ticket details and history', mysqlTests, async t => {
+  const app = await start(await testDatabase(t), { projectNames: [] })
+  t.after(() => app.close())
+  assert.deepEqual((await app.request('/api/workspace')).data.projects, [])
+  const draft = { title: 'Fix invoice', project: 'Billing', type: 'Bug', description: 'Existing description' }
+  assert.equal((await app.request('/api/items', 'POST', draft)).status, 400)
+  assert.equal((await app.request('/api/projects', 'POST', { name: ' Billing ' })).status, 201)
+  assert.equal((await app.request('/api/projects', 'POST', { name: 'billing' })).status, 409)
+  assert.deepEqual((await app.request('/api/workspace')).data.projects, ['Billing'])
+  assert.equal((await app.request('/api/import', 'POST', [draft, { ...draft, project: 'Missing' }])).status, 400)
+  assert.deepEqual((await app.request('/api/workspace')).data.items, [])
+  const created = await app.request('/api/items', 'POST', { ...draft, project: 'billing' })
+  assert.equal(created.status, 201)
+  assert.equal(created.data.project, 'Billing')
+  const path = '/api/items/' + created.data.id
+  const moved = await app.request(path + '/status', 'PATCH', { status: 'In progress', version: created.data.version, description: 'Ignored' })
+  assert.equal(moved.status, 200)
+  assert.equal(moved.data.status, 'In progress')
+  assert.equal(moved.data.description, draft.description)
+  assert.match(moved.data.events[0].body, /To do → In progress/)
+  assert.equal((await app.request(path + '/status', 'PATCH', { status: 'Blocked', version: created.data.version })).status, 409)
+  assert.equal((await app.request(path + '/status', 'PATCH', { status: 'Done', version: moved.data.version })).status, 400)
+  assert.equal((await app.request(path, 'PATCH', { ...moved.data, status: 'Done', resolution: 'Verified' })).status, 200)
 })
 
 test('deployed HTTPS origin issues a secure same-origin session', mysqlTests, async t => {

@@ -14,6 +14,7 @@ export function connectDatabase(config) {
   }
   const operations = client => ({
     item: client.item,
+    project: client.project,
     itemImage: client.itemImage,
     user: client.user,
     query: (sql, args = []) => query(client, sql, args),

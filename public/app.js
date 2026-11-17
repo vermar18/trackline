@@ -35,13 +35,15 @@ const types = ['Feature', 'Bug', 'Fix', 'Task']
 const priorities = ['Low', 'Medium', 'High', 'Urgent']
 const nav = [['overview', 'Overview', 'grid'], ['work', 'All work', 'list'], ['board', 'Board', 'board'], ['activity', 'Activity', 'activity'], ['team', 'Team members', 'users']]
 const fields = ['title','type','project','owner','status','priority','due','description','resolution']
-const workspace = { items: [], activity: [], members: [] }
+const workspace = { items: [], activity: [], members: [], projects: [] }
 let session
 let team = null
 const filters = { search: '', project: '', status: '', type: '', owner: '', priority: '', focus: '' }
 let view = 'overview'
 let toastTimer, openRequest = 0, workspaceRequest = 0
 let lastWorkspace = ''
+let draggedItem
+const movingItems = new Set()
 
 function staticIcons(root = document) {
   root.querySelectorAll('[data-icon]').forEach(node => { node.innerHTML = icon(node.dataset.icon) })
@@ -84,7 +86,7 @@ function showAccount(user = null, change = false) {
     if (!user) {
       workspaceRequest++
       openRequest++
-      Object.assign(workspace, { items: [], activity: [], members: [] })
+      Object.assign(workspace, { items: [], activity: [], members: [], projects: [] })
       lastWorkspace = ''
       team = null
       history.replaceState(null, '', '#overview')
@@ -110,7 +112,7 @@ function showAccount(user = null, change = false) {
 async function refresh() {
   const request = ++workspaceRequest
   const result = await api('/api/workspace')
-  if (request !== workspaceRequest) return
+  if (request !== workspaceRequest || draggedItem) return
   const snapshot = JSON.stringify(result)
   if (snapshot === lastWorkspace) return
   lastWorkspace = snapshot
@@ -139,7 +141,8 @@ const focusChecks = { active: item => ['In progress', 'In review'].includes(item
   attention: item => overdue(item) || stale(item) || item.status === 'Blocked' || (item.status !== 'Done' && !item.owner) }
 const focusLabels = { active: 'In flight', overdue: 'Overdue', done: 'Completed', attention: 'Needs attention' }
 const ref = id => 'TL-' + String(id).padStart(3, '0')
-const projects = () => [...new Set(workspace.items.map(item => item.project))].sort((a,b) => a.localeCompare(b))
+const projects = () => workspace.projects
+const projectMatches = (left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }) === 0
 const owners = () => [...new Set([...workspace.members, ...workspace.items.map(item => item.owner).filter(Boolean)])].sort((a,b) => a.localeCompare(b))
 const statusPill = status => `<span class="pill status status-${statuses.indexOf(status)}">${esc(status)}</span>`
 const typeIcon = type => `<span class="type-icon type-${type.toLowerCase()}" title="${type}">${icon({ Bug: 'bug', Feature: 'spark', Fix: 'tool', Task: 'task' }[type])}</span>`
@@ -148,6 +151,7 @@ const option = (value, selected, label = value) => `<option value="${esc(value)}
 
 function readRoute() {
   if (!session || $('#workspace').hidden) return
+  if (draggedItem) endBoardDrag()
   const [route, query = ''] = location.hash.slice(1).split('?')
   const params = new URLSearchParams(query)
   view = nav.some(([key]) => key === route) && (route !== 'team' || session.role === 'admin') ? route : 'overview'
@@ -167,7 +171,7 @@ function routeTo(next, values = {}, replace = false) {
 function filteredItems() {
   const query = filters.search.toLowerCase().trim()
   return workspace.items.filter(item =>
-    (!filters.project || item.project === filters.project) &&
+    (!filters.project || projectMatches(item.project, filters.project)) &&
     (!filters.status || item.status === filters.status) &&
     (!filters.type || item.type === filters.type) &&
     (!filters.owner || (filters.owner === ':unassigned' ? !item.owner : item.owner === filters.owner)) &&
@@ -176,8 +180,9 @@ function filteredItems() {
     (!query || [ref(item.id), item.title, item.description, item.resolution, item.owner, item.project].some(value => value.toLowerCase().includes(query))))
 }
 function renderNav() {
+  $('#new-project').hidden = session.role !== 'admin'
   $('#workspace-nav').innerHTML = nav.filter(([key]) => key !== 'team' || session.role === 'admin').map(([key, label, graphic]) => `<button class="nav-item${view === key && !filters.project ? ' active' : ''}" data-view="${key}"${view === key && !filters.project ? ' aria-current="page"' : ''}>${icon(graphic)}${label}</button>`).join('')
-  $('#project-nav').innerHTML = projects().map(project => `<button class="nav-item${filters.project === project ? ' active' : ''}" data-project="${esc(project)}"${filters.project === project ? ' aria-current="page"' : ''}><span class="project-dot ${color(project)}"></span><span class="truncate">${esc(project)}</span><span class="count">${workspace.items.filter(item => item.project === project && item.status !== 'Done').length}</span></button>`).join('')
+  $('#project-nav').innerHTML = projects().map(project => `<button class="nav-item${filters.project === project ? ' active' : ''}" data-project="${esc(project)}"${filters.project === project ? ' aria-current="page"' : ''}><span class="project-dot ${color(project)}"></span><span class="truncate">${esc(project)}</span><span class="count">${workspace.items.filter(item => projectMatches(item.project, project) && item.status !== 'Done').length}</span></button>`).join('')
   $('#profile-avatar').outerHTML = avatar(session.name).replace('class=', 'id="profile-avatar" class=')
   $('#profile-name').textContent = session.name
   $('#profile-context').textContent = session.role === 'admin' ? 'Super admin' : 'Workspace member'
@@ -231,7 +236,13 @@ function filterSelect(key, title, values) {
 function board(items) {
   return `<div class="board" aria-label="Work board">${statuses.map(status => {
     const cards = items.filter(item => item.status === status)
-    return `<section class="board-col"><header>${statusPill(status)}<b>${cards.length}</b></header>${cards.map(item => `<button class="board-card" data-id="${item.id}"><span class="board-meta">${typeIcon(item.type)}<small>${ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>`).join('') || empty('No items')}</section>`
+    return `<section class="board-col" data-board-status="${status}" aria-label="${status}"><header>${statusPill(status)}<b>${cards.length}</b></header>${cards.map(item => `
+      <article class="board-card" data-board-item="${item.id}" draggable="true">
+        <button type="button" class="board-card-open" data-id="${item.id}"><span class="board-meta">${typeIcon(item.type)}<small>${ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
+        <select class="board-move" data-move-item="${item.id}" aria-label="Move ${esc(item.title)} to another status">
+          ${option('', '', 'Move to…')}${statuses.filter(next => next !== status).map(next => option(next)).join('')}
+        </select>
+      </article>`).join('') || empty('No items')}</section>`
   }).join('')}</div>`
 }
 function work() {
@@ -325,10 +336,12 @@ function fillDrawer(item, redraw = false) {
   const savedImages = item.images ? [...item.images] : []
   const draftImages = item._draftImages ? [...item._draftImages] : []
   const removedImageIds = item._removedImageIds ? [...item._removedImageIds] : []
+  const projectChoices = [...new Set([...projects(), ...(existing ? [item.project] : [])])]
   dialog.innerHTML = `<div class="dialog-head"><div><h2 id="item-dialog-title">${existing ? esc(item.title) : 'New work item'}</h2><p>${existing ? ref(item.id) + ' · ' + esc(item.project) : 'Track a feature, bug, fix, or task.'}</p></div><button class="icon-button" data-action="close" aria-label="Close">${icon('x')}</button></div>
     <form id="item-form"><div class="fields">
       ${formField('Title', 'title', item.title, 'maxlength="180" required autofocus')}
-      ${formField('Project', 'project', item.project, 'maxlength="180" list="project-options" required')}
+      <label>Project<select name="project" required><option value="">Select a project</option>${projectChoices.map(name => option(name, item.project)).join('')}</select>
+      ${projectChoices.length ? '' : '<small>Ask a super admin to create a project first.</small>'}</label>
       ${picker('Type', 'type', types, item.type || 'Task')}
       ${formField('Assignee', 'owner', item.owner, 'maxlength="180" list="owner-options" placeholder="Unassigned"')}
       ${picker('Status', 'status', statuses, item.status || 'To do')}
@@ -349,7 +362,6 @@ function fillDrawer(item, redraw = false) {
         </div>
       </div>
       <label class="wide">Resolution<textarea name="resolution" maxlength="10000" placeholder="Record what changed and how it was verified">${esc(item.resolution)}</textarea></label>
-      <datalist id="project-options">${projects().map(value => option(value)).join('')}</datalist>
       <datalist id="owner-options">${owners().map(value => option(value)).join('')}</datalist>
     </div><p class="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="button secondary" data-action="close">${existing ? 'Close' : 'Cancel'}</button><button class="button primary">${existing ? 'Save changes' : 'Create item'}</button></div></form>
     ${existing ? timeline(item) : ''}`
@@ -567,6 +579,69 @@ function setMenu(open) {
   if (open) $('.brand').focus()
 }
 
+async function moveBoardItem(item, status) {
+  if (!item || status === item.status || movingItems.has(item.id)) return
+  movingItems.add(item.id)
+  try {
+    if (status === 'Done' && !item.resolution.trim()) {
+      const detail = await api(`/api/items/${item.id}`)
+      if (view !== 'board' || document.querySelector('dialog[open]')) return
+      fillDrawer({ ...detail, status: 'Done' })
+      $('#item-form').elements.resolution.focus()
+      return
+    }
+    await api(`/api/items/${item.id}/status`, 'PATCH', { status, version: item.version })
+    await refreshAfterSave()
+    notify(`${ref(item.id)} moved to ${status}`)
+  } catch (error) {
+    if (error.status === 409) await refresh().catch(() => {})
+    notify(error.message)
+  } finally {
+    movingItems.delete(item.id)
+  }
+}
+
+const clearDropTarget = () => $('.board-col.is-drop-target')?.classList.remove('is-drop-target')
+function endBoardDrag() {
+  draggedItem = undefined
+  $('.board-card.is-dragging')?.classList.remove('is-dragging')
+  clearDropTarget()
+}
+
+const main = $('#main')
+main.addEventListener('dragstart', event => {
+  const card = event.target.closest('.board-card')
+  if (!card || event.target.closest('select')) return
+  draggedItem = workspace.items.find(item => item.id === Number(card.dataset.boardItem))
+  if (!draggedItem) return
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', ref(draggedItem.id))
+  card.classList.add('is-dragging')
+})
+main.addEventListener('dragover', event => {
+  if (!draggedItem) return
+  const column = event.target.closest('.board-col')
+  if (column?.classList.contains('is-drop-target')) { event.preventDefault(); return }
+  clearDropTarget()
+  if (!column || column.dataset.boardStatus === draggedItem.status) return
+  event.preventDefault()
+  event.dataTransfer.dropEffect = 'move'
+  column.classList.add('is-drop-target')
+})
+main.addEventListener('dragleave', event => {
+  const column = event.target.closest('.board-col')
+  if (column && !column.contains(event.relatedTarget)) column.classList.remove('is-drop-target')
+})
+main.addEventListener('dragend', endBoardDrag)
+main.addEventListener('drop', event => {
+  const column = event.target.closest('.board-col')
+  if (!column || !draggedItem) return
+  event.preventDefault()
+  const item = draggedItem
+  endBoardDrag()
+  void moveBoardItem(item, column.dataset.boardStatus)
+})
+
 document.addEventListener('click', async event => {
   const button = event.target.closest('button')
   if ($('.sidebar').classList.contains('open') && !event.target.closest('.sidebar') && button?.id !== 'menu') setMenu(false)
@@ -586,6 +661,12 @@ document.addEventListener('click', async event => {
     case 'focus': return routeTo('work', { focus: button.dataset.focus })
     case 'clear-focus': return routeTo(view, { ...filters, focus: '' })
     case 'create': return fillDrawer({ project: filters.project })
+    case 'new-project': {
+      const form = $('#project-form')
+      form.reset()
+      form.querySelector('.form-error').textContent = ''
+      return $('#project-dialog').showModal()
+    }
     case 'close': return button.closest('dialog').close()
     case 'import':
       setMenu(false)
@@ -614,6 +695,22 @@ document.addEventListener('click', async event => {
 })
 document.addEventListener('change', event => {
   if (event.target.dataset.filter) routeTo(view, { ...filters, [event.target.dataset.filter]: event.target.value })
+  if (event.target.dataset.moveItem && event.target.value) {
+    const select = event.target
+    const status = select.value
+    select.value = ''
+    void moveBoardItem(workspace.items.find(item => item.id === Number(select.dataset.moveItem)), status)
+  }
+})
+$('#project-form').addEventListener('submit', event => {
+  event.preventDefault()
+  const form = event.currentTarget
+  void submit(form, async () => {
+    const { name } = await api('/api/projects', 'POST', Object.fromEntries(new FormData(form)))
+    $('#project-dialog').close()
+    notify(`Created project “${name}”`)
+    await refreshAfterSave()
+  })
 })
 $('#search').addEventListener('input', event => {
   const next = ['work', 'board'].includes(view) ? view : 'work'

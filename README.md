@@ -66,6 +66,12 @@ If a MySQL schema already contains real Trackline data from the earlier version,
 
 Only the super admin can manage accounts. Members can view and update all projects and their usernames appear in item history.
 
+## Create projects and move incidents
+
+Select the **+** beside **Projects** as super admin to add an option to the **Project** dropdown. The migration registers projects from existing work items. For CSV import, create any additional projects before uploading the file.
+
+On **Board**, drag a card into the destination column, or use its **Move to…** dropdown with a keyboard or touch screen. Moving a card records a status change in its activity. Moving to **Done** opens the item for a resolution when one is missing.
+
 ## What the workflow needs
 
 | Where the spreadsheet breaks down | How Trackline handles it |

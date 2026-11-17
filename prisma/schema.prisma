@@ -13,6 +13,12 @@ enum UserRole {
   member
 }
 
+model Project {
+  name String @id @db.VarChar(180)
+
+  @@map("projects")
+}
+
 model Item {
   id          Int    @id @default(autoincrement()) @db.UnsignedInt
   title       String @db.VarChar(180)
