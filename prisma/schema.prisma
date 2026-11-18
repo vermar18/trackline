@@ -19,6 +19,18 @@ model Project {
   @@map("projects")
 }
 
+model ImageUpload {
+  upload_id String @db.Char(36)
+  username  String @db.VarChar(64)
+  part      Int    @db.UnsignedInt
+  data      String @db.MediumText
+  expires   BigInt @db.UnsignedBigInt
+
+  @@id([upload_id, username, part])
+  @@index([expires], map: "uploads_expiry")
+  @@map("image_uploads")
+}
+
 model Item {
   id          Int    @id @default(autoincrement()) @db.UnsignedInt
   title       String @db.VarChar(180)

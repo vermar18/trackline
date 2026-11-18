@@ -40,6 +40,26 @@ function itemFields(value) {
 }
 
 const allowedMimeTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml']
+const uploadIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
+
+async function resolveImages(connection, input, username) {
+  if (!Array.isArray(input)) return parseImages(input)
+  if (input.length > 10) bad('You can include at most 10 images at a time.')
+  const resolved = []
+  for (const image of input) {
+    if (!image?.uploadId) { resolved.push(image); continue }
+    if (!uploadIdPattern.test(image.uploadId)) bad('Invalid image upload.')
+    const parts = await connection.query('SELECT part,data FROM image_uploads WHERE upload_id=? AND username=? AND expires>? ORDER BY part FOR UPDATE',
+      [image.uploadId, username, Date.now()])
+    if (!Number.isInteger(image.parts) || image.parts < 1 || image.parts > 26 ||
+      parts.length !== image.parts || parts.some((part, index) => part.part !== index)) {
+      bad('An image upload is incomplete or expired. Attach the image again.')
+    }
+    resolved.push({ ...image, data: parts.map(part => part.data).join('') })
+    await connection.execute('DELETE FROM image_uploads WHERE upload_id=? AND username=?', [image.uploadId, username])
+  }
+  return parseImages(resolved)
+}
 
 function parseImages(input) {
   if (!input) return []
@@ -80,14 +100,38 @@ async function saveImages(connection, itemId, images, at) {
 }
 
 async function readJSON(request) {
+  const limit = 25_000_000
+  if (Number(request.headers['content-length']) > limit) bad('Request exceeds 25 MB.', 413)
   let size = 0
   const chunks = []
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     size += chunk.length
-    if (size > 25_000_000) bad('Request exceeds 25 MB.', 413)
+    if (size > limit) bad('Request exceeds 25 MB.', 413)
     chunks.push(chunk)
   }
   try { return JSON.parse(Buffer.concat(chunks)) } catch { bad('Invalid JSON.') }
+}
+
+export async function readTicket(db, id) {
+  // A single statement gives the ticket, timeline and attachment metadata one snapshot.
+  const ticket = await db.one(`
+    SELECT items.*,
+      (SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+        'id', events.id, 'item_id', events.item_id, 'kind', events.kind,
+        'actor', events.actor, 'body', events.body, 'minutes', events.minutes, 'at', events.at
+      )), JSON_ARRAY()) FROM events WHERE events.item_id=items.id) AS events,
+      (SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+        'id', item_images.id, 'item_id', item_images.item_id, 'filename', item_images.filename,
+        'mime_type', item_images.mime_type, 'size', item_images.size, 'created', item_images.created
+      )), JSON_ARRAY()) FROM item_images WHERE item_images.item_id=items.id) AS images
+    FROM items WHERE items.id=?`, [id])
+  if (!ticket) bad('Work item not found.', 404)
+  for (const key of ['events', 'images']) {
+    if (typeof ticket[key] === 'string') ticket[key] = JSON.parse(ticket[key])
+  }
+  ticket.events.sort((left, right) => right.id - left.id)
+  ticket.images.sort((left, right) => left.id - right.id)
+  return ticket
 }
 
 export function createRequestHandler(db, { origin } = {}) {
@@ -154,6 +198,12 @@ export function createRequestHandler(db, { origin } = {}) {
           select: { filename: true, mime_type: true, size: true, data: true },
         })
         if (!img) bad('Image not found.', 404)
+        if (url.searchParams.has('part')) {
+          const part = Number(url.searchParams.get('part'))
+          const parts = Math.ceil(img.size / 524288)
+          if (!Number.isInteger(part) || part < 0 || part >= parts) bad('Invalid image part.')
+          return send(200, { data: Buffer.from(img.data).subarray(part * 524288, (part + 1) * 524288).toString('base64') })
+        }
         response.writeHead(200, {
           'Content-Type': img.mime_type,
           'Content-Length': img.size,
@@ -177,6 +227,22 @@ export function createRequestHandler(db, { origin } = {}) {
         bad('Page not found.', 404)
       }
       const actor = user.name === user.username ? user.name : `${user.name} (@${user.username})`
+      const uploadMatch = /^\/api\/uploads\/([^/]+)\/(\d+)$/.exec(pathname)
+      if (method === 'PUT' && uploadMatch) {
+        const uploadId = uploadMatch[1]
+        const part = Number(uploadMatch[2])
+        const data = value?.data
+        if (!uploadIdPattern.test(uploadId) || part > 25 || typeof data !== 'string' ||
+          !data.length || data.length > 524288 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) bad('Invalid image upload part.')
+        await db.execute('DELETE FROM image_uploads WHERE expires<=? LIMIT 100', [Date.now()])
+        const { total } = await db.one('SELECT COUNT(DISTINCT upload_id) AS total FROM image_uploads WHERE username=?', [user.username])
+        if (total >= 20 && !await db.one('SELECT 1 FROM image_uploads WHERE upload_id=? AND username=? LIMIT 1', [uploadId, user.username])) {
+          bad('Too many pending image uploads. Try again after older uploads expire.')
+        }
+        await db.execute('INSERT INTO image_uploads(upload_id,username,part,data,expires) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE data=VALUES(data),expires=VALUES(expires)',
+          [uploadId, user.username, part, data, Date.now() + 24 * 60 * 60 * 1000])
+        return send(200, { uploaded: true })
+      }
       if (method === 'POST' && pathname === '/api/projects') {
         if (user.role !== 'admin') bad('Super admin access is required.', 403)
         const name = field(value?.name, 180)
@@ -202,8 +268,8 @@ export function createRequestHandler(db, { origin } = {}) {
       }
       if (method === 'POST' && pathname === '/api/items') {
         const item = itemFields(value)
-        const images = parseImages(value?.images)
         return send(201, await db.transaction(async connection => {
+          const images = await resolveImages(connection, value?.images, user.username)
           item.project = await requireProject(connection, item.project)
           const at = now()
           const id = await add(connection, item, actor, 'Created', at)
@@ -248,7 +314,20 @@ export function createRequestHandler(db, { origin } = {}) {
       if (!match) bad('Page not found.', 404)
       const id = Number(match[1])
       if (!Number.isSafeInteger(id) || id > 4294967295) bad('Work item not found.', 404)
-      if (method === 'GET' && !match[2]) return send(200, await db.transaction(connection => detail(connection, id)))
+      if (method === 'GET' && !match[2]) return send(200, await readTicket(db, id))
+      if (method === 'PATCH' && match[2] === '/status' && url.searchParams.get('summary') === '1') {
+        return send(200, await db.transaction(async connection => {
+          const current = await get(connection, id, true)
+          if (value?.version !== current.version) bad('This item changed since you opened it. Refresh or reopen it before trying again.', 409)
+          if (!statuses.includes(value.status)) bad('Choose a valid status.')
+          if (value.status === 'Done' && !current.resolution.trim()) bad('Add a resolution before marking this item done.')
+          if (value.status === current.status) return current
+          const updated = now()
+          await connection.execute('UPDATE items SET status=?,updated=?,version=version+1 WHERE id=?', [value.status, updated, id])
+          await log(connection, id, 'Updated', actor, `Status: ${current.status} → ${value.status}`, 0, updated)
+          return { ...current, status: value.status, updated, version: current.version + 1 }
+        }))
+      }
       if (method === 'PATCH' && match[2] !== '/events') {
         return send(200, await db.transaction(async connection => {
           const current = await get(connection, id, true)
@@ -257,6 +336,11 @@ export function createRequestHandler(db, { origin } = {}) {
           if (statusOnly && !statuses.includes(value.status)) bad('Choose a valid status.')
           if (statusOnly && value.status === 'Done' && !current.resolution.trim()) bad('Add a resolution before marking this item done.')
           const item = statusOnly ? { ...current, status: value.status } : itemFields(value)
+          const update = !statusOnly && value.update
+          if (update && (!['Comment', 'Work log'].includes(update.kind) || !field(update.body) ||
+            (update.kind === 'Work log' && (!Number.isInteger(update.minutes) || update.minutes < 1 || update.minutes > 1440)))) {
+            bad('Add a comment or a work log with 1 to 1,440 minutes.')
+          }
           if (item.project !== current.project) item.project = await requireProject(connection, item.project)
           const changed = columns.filter(key => current[key] !== item[key])
           let imagesChanged = false
@@ -269,7 +353,7 @@ export function createRequestHandler(db, { origin } = {}) {
             }
           }
           const rawImages = statusOnly ? undefined : value?.newImages || (Array.isArray(value?.images) && value.images.some(img => img?.data) ? value.images.filter(img => img?.data) : undefined)
-          const newImages = parseImages(rawImages)
+          const newImages = await resolveImages(connection, rawImages, user.username)
           if (newImages.length) {
             await saveImages(connection, id, newImages, now())
             imagesChanged = true
@@ -286,6 +370,10 @@ export function createRequestHandler(db, { origin } = {}) {
           } else if (imagesChanged) {
             await connection.execute('UPDATE items SET updated=?,version=version+1 WHERE id=?', [now(), id])
             await log(connection, id, 'Updated', actor, 'Updated description images')
+          }
+          if (update) {
+            await log(connection, id, update.kind, actor, field(update.body), update.kind === 'Work log' ? update.minutes : 0)
+            await connection.execute('UPDATE items SET updated=? WHERE id=?', [now(), id])
           }
           return detail(connection, id)
         }))
@@ -306,6 +394,10 @@ export function createRequestHandler(db, { origin } = {}) {
       }
       bad('Method not supported.', 405)
     } catch (error) {
+      if (error.status === 413 && !request.complete) {
+        response.setHeader('Connection', 'close')
+        request.resume()
+      }
       if (!error.status) console.error('Trackline request failed:', error.code || error.name, error.message)
       send(error.status || 500, { error: error.status ? error.message : (error.code ? `Database connection failed (${error.code}).` : (error.message || 'The tracker could not complete this request.')) })
     }

@@ -105,5 +105,9 @@ If your existing Amplify app is configured for static hosting, switch its platfo
 
 ## Scope and next decisions
 
-This version focuses on ownership, item history, resolutions, and dashboard follow-up. The remaining team decisions are who owns the shared host and backups, which workbook columns need mapping, and whether overdue alerts should be sent somewhere outside the dashboard. Attachments, scheduled alerts, and project-level permissions are outside the current implementation.
+Description images upload in small parts so multiple screenshots can be saved through Amplify. Save changes also posts a pending discussion comment or work log together with the incident changes. Pending image parts expire after 24 hours and are cleaned up during subsequent uploads.
+
+Apply the included Prisma migrations before deploying this version. The runtime database account needs SELECT, INSERT, UPDATE and DELETE on the new `image_uploads` table as well as the existing application tables.
+
+The remaining team decisions are who owns backups, which workbook columns need mapping, and whether overdue alerts should be sent somewhere outside the dashboard. Scheduled alerts and project-level permissions are outside the current implementation.
 

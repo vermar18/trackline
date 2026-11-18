@@ -42,8 +42,11 @@ const filters = { search: '', project: '', status: '', type: '', owner: '', prio
 let view = 'overview'
 let toastTimer, openRequest = 0, workspaceRequest = 0
 let lastWorkspace = ''
+let workspaceLoaded = false
 let draggedItem
 const movingItems = new Set()
+let boardRefreshTimer
+let renderAfterDrag = false
 
 function staticIcons(root = document) {
   root.querySelectorAll('[data-icon]').forEach(node => { node.innerHTML = icon(node.dataset.icon) })
@@ -55,13 +58,42 @@ function notify(message) {
   toastTimer = setTimeout(() => { toast.textContent = '' }, 3200)
 }
 async function api(path, method = 'GET', body) {
-  const response = await fetch(path, { method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
-  const result = await response.json()
+  let response
+  try {
+    response = await fetch(path, { method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+  } catch {
+    throw new Error(method === 'GET' ? 'Could not reach Trackline. Check your connection and try again.'
+      : 'Trackline did not confirm this change. Check the incident before retrying. Your draft is still open.')
+  }
+  const result = await response.json().catch(() => null)
   if (!response.ok) {
     if (response.status === 401 && session) showAccount()
-    throw Object.assign(new Error(result.error || 'Request failed.'), { status: response.status })
+    const message = response.status === 413 ? 'The server rejected an upload because it is too large. Try fewer or smaller attachments.'
+      : `Trackline returned HTTP ${response.status}. Your draft is still open.`
+    throw Object.assign(new Error(result?.error || message), { status: response.status })
   }
+  if (result === null) throw new Error('Trackline returned an empty or unreadable response. Check the incident before retrying. Your draft is still open.')
   return result
+}
+
+async function uploadImages(images, onProgress) {
+  const results = []
+  for (const [index, image] of images.entries()) {
+    if (Date.now() - (image.uploadStartedAt || 0) > 23 * 60 * 60 * 1000) {
+      image.uploadId = undefined
+      image.uploadedParts = 0
+      image.uploadStartedAt = Date.now()
+    }
+    image.uploadId ||= crypto.randomUUID()
+    const parts = Math.ceil(image.data.length / 524288)
+    for (let part = image.uploadedParts || 0; part < parts; part++) {
+      onProgress(`Uploading image ${index + 1} of ${images.length} · ${Math.round(part / parts * 100)}%`)
+      await api(`/api/uploads/${image.uploadId}/${part}`, 'PUT', { data: image.data.slice(part * 524288, (part + 1) * 524288) })
+      image.uploadedParts = part + 1
+    }
+    results.push({ uploadId: image.uploadId, parts, filename: image.filename, mimeType: image.mimeType })
+  }
+  return results
 }
 function showAccount(user = null, change = false) {
   session = user
@@ -88,6 +120,7 @@ function showAccount(user = null, change = false) {
       openRequest++
       Object.assign(workspace, { items: [], activity: [], members: [], projects: [] })
       lastWorkspace = ''
+      workspaceLoaded = false
       team = null
       history.replaceState(null, '', '#overview')
       $('#search').value = ''
@@ -106,17 +139,26 @@ function showAccount(user = null, change = false) {
     $('#login-form').elements.username.focus()
   } else {
     readRoute()
-    refresh().catch(error => { if (session) notify(error.message) })
+    refresh().catch(error => {
+      if (!session) return
+      if (!workspaceLoaded) {
+        $('#main').setAttribute('aria-busy', 'false')
+        $('#main').innerHTML = '<div class="workspace-loading"><p>Could not load your workspace.</p><button class="button secondary" data-action="retry-workspace">Try again</button></div>'
+      }
+      notify(error.message)
+    })
   }
 }
 async function refresh() {
+  if (movingItems.size) return
   const request = ++workspaceRequest
   const result = await api('/api/workspace')
-  if (request !== workspaceRequest || draggedItem) return
+  if (request !== workspaceRequest || draggedItem || movingItems.size) return
   const snapshot = JSON.stringify(result)
   if (snapshot === lastWorkspace) return
   lastWorkspace = snapshot
   Object.assign(workspace, result)
+  workspaceLoaded = true
   $('#main').setAttribute('aria-busy', 'false')
   render()
 }
@@ -237,9 +279,9 @@ function board(items) {
   return `<div class="board" aria-label="Work board">${statuses.map(status => {
     const cards = items.filter(item => item.status === status)
     return `<section class="board-col" data-board-status="${status}" aria-label="${status}"><header>${statusPill(status)}<b>${cards.length}</b></header>${cards.map(item => `
-      <article class="board-card" data-board-item="${item.id}" draggable="true">
-        <button type="button" class="board-card-open" data-id="${item.id}"><span class="board-meta">${typeIcon(item.type)}<small>${ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
-        <select class="board-move" data-move-item="${item.id}" aria-label="Move ${esc(item.title)} to another status">
+      <article class="board-card${movingItems.has(item.id) ? ' is-saving' : ''}" data-board-item="${item.id}" draggable="${!movingItems.has(item.id)}" aria-busy="${movingItems.has(item.id)}">
+        <button type="button" class="board-card-open" data-id="${item.id}" ${movingItems.has(item.id) ? 'disabled' : ''}><span class="board-meta">${typeIcon(item.type)}<small>${movingItems.has(item.id) ? 'Saving…' : ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
+        <select class="board-move" data-move-item="${item.id}" ${movingItems.has(item.id) ? 'disabled' : ''} aria-label="Move ${esc(item.title)} to another status">
           ${option('', '', 'Move to…')}${statuses.filter(next => next !== status).map(next => option(next)).join('')}
         </select>
       </article>`).join('') || empty('No items')}</section>`
@@ -283,10 +325,24 @@ async function loadTeam() {
 }
 function render() {
   if (!session || $('#workspace').hidden) return
+  if (draggedItem) {
+    renderAfterDrag = true
+    return
+  }
   renderNav()
   const main = $('#main')
+  if (!workspaceLoaded) {
+    main.innerHTML = '<div class="workspace-loading" role="status"><span class="loading-spinner" aria-hidden="true"></span><p>Loading your workspace…</p></div>'
+    return
+  }
   if (view === 'team' && $('#member-form')) return
+  const scrollLeft = main.querySelector('.board')?.scrollLeft || 0
+  const focus = document.activeElement
+  const focusSelector = focus?.matches('[data-move-item]') ? `[data-move-item="${focus.dataset.moveItem}"]`
+    : focus?.matches('.board-card-open') ? `.board-card-open[data-id="${focus.dataset.id}"]` : null
   main.innerHTML = view === 'overview' ? overview() : view === 'activity' ? activity() : view === 'team' ? teamPage() : work()
+  if (main.querySelector('.board')) main.querySelector('.board').scrollLeft = scrollLeft
+  if (focusSelector) main.querySelector(focusSelector)?.focus({ preventScroll: true })
 }
 function formField(label, key, value, extras = '') {
   return `<label${key === 'title' ? ' class="wide"' : ''}>${label}<input name="${key}" value="${esc(value)}" ${extras}></label>`
@@ -332,10 +388,28 @@ function openLightbox(src, filename) {
 
 function fillDrawer(item, redraw = false) {
   const dialog = $('#item-dialog')
+  delete dialog.dataset.loadingRequest
+  dialog.removeAttribute('aria-busy')
+  dialog.imageListeners?.abort()
+  const imageListeners = new AbortController()
+  dialog.imageListeners = imageListeners
   const existing = item.id != null
   const savedImages = item.images ? [...item.images] : []
   const draftImages = item._draftImages ? [...item._draftImages] : []
   const removedImageIds = item._removedImageIds ? [...item._removedImageIds] : []
+  const imageUrls = new Map()
+  const savedImageUrl = image => {
+    if (image.size <= 4_000_000) return Promise.resolve(`/api/images/${image.id}`)
+    if (!imageUrls.has(image.id)) imageUrls.set(image.id, (async () => {
+      const buffers = []
+      for (let part = 0; part < Math.ceil(image.size / 524288); part++) {
+        const { data } = await api(`/api/images/${image.id}?part=${part}`)
+        buffers.push(Uint8Array.from(atob(data), char => char.charCodeAt(0)))
+      }
+      return URL.createObjectURL(new Blob(buffers, { type: image.mime_type }))
+    })())
+    return imageUrls.get(image.id)
+  }
   const projectChoices = [...new Set([...projects(), ...(existing ? [item.project] : [])])]
   const assigneeChoices = [...new Set([...workspace.members, item.owner].filter(Boolean))]
     .sort((left, right) => left.localeCompare(right))
@@ -379,7 +453,7 @@ function fillDrawer(item, redraw = false) {
     visibleSaved.forEach(img => {
       html += `<div class="image-card" data-id="${img.id}">
         <button type="button" class="image-thumb-btn" data-action="view-saved-img" data-id="${img.id}" data-filename="${esc(img.filename)}" title="Click to view full size">
-          <img src="/api/images/${img.id}" alt="${esc(img.filename)}" loading="lazy">
+          <img ${img.size <= 4_000_000 ? `src="/api/images/${img.id}"` : `data-large-image="${img.id}"`} alt="${esc(img.filename)}" loading="lazy">
         </button>
         <div class="image-meta">
           <span class="image-filename" title="${esc(img.filename)}">${esc(img.filename)}</span>
@@ -401,6 +475,12 @@ function fillDrawer(item, redraw = false) {
       </div>`
     })
     listEl.innerHTML = html
+    for (const image of visibleSaved.filter(image => image.size > 4_000_000)) {
+      const preview = listEl.querySelector(`[data-large-image="${image.id}"]`)
+      savedImageUrl(image).then(url => { if (preview.isConnected) preview.src = url }).catch(() => {
+        if (preview.isConnected) preview.alt = 'Could not load image. Reopen the incident to retry.'
+      })
+    }
   }
 
   const addFiles = async files => {
@@ -471,12 +551,15 @@ function fillDrawer(item, redraw = false) {
       await addFiles(files)
     }
   }
-  dialog.addEventListener('paste', pasteListener)
+  dialog.addEventListener('paste', pasteListener, { signal: imageListeners.signal })
 
   dialog.addEventListener('click', e => {
     const viewSaved = e.target.closest('[data-action="view-saved-img"]')
     if (viewSaved) {
-      openLightbox(`/api/images/${viewSaved.dataset.id}`, viewSaved.dataset.filename || 'image.png')
+      const image = savedImages.find(image => image.id === Number(viewSaved.dataset.id))
+      if (image) savedImageUrl(image).then(url => {
+        if (dialog.open) openLightbox(url, image.filename)
+      }).catch(error => notify(error.message))
       return
     }
     const viewDraft = e.target.closest('[data-action="view-draft-img"]')
@@ -498,12 +581,13 @@ function fillDrawer(item, redraw = false) {
       renderImages()
       return
     }
-  })
+  }, { signal: imageListeners.signal })
 
   dialog.addEventListener('close', () => {
-    dialog.removeEventListener('paste', pasteListener)
+    imageListeners.abort()
+    for (const promise of imageUrls.values()) promise.then(url => URL.revokeObjectURL(url)).catch(() => {})
     draftImages.forEach(img => { if (img.previewUrl) URL.revokeObjectURL(img.previewUrl) })
-  }, { once: true })
+  }, { once: true, signal: imageListeners.signal })
 
   const setResolution = () => { form.elements.resolution.required = form.elements.status.value === 'Done' }
   form.elements.status.addEventListener('change', setResolution)
@@ -513,22 +597,30 @@ function fillDrawer(item, redraw = false) {
     const values = Object.fromEntries(new FormData(form))
     if (existing) {
       values.version = item.version
-      if (draftImages.length) {
-        values.newImages = draftImages.map(img => ({ filename: img.filename, mimeType: img.mimeType, size: img.size, data: img.data }))
-      }
       if (removedImageIds.length) {
         values.removedImageIds = removedImageIds
       }
-    } else {
-      if (draftImages.length) {
-        values.images = draftImages.map(img => ({ filename: img.filename, mimeType: img.mimeType, size: img.size, data: img.data }))
-      }
     }
     await submit(form, async () => {
-      const saved = await api(existing ? `/api/items/${item.id}` : '/api/items', existing ? 'PATCH' : 'POST', values)
-      if (form.isConnected && dialog.open) dialog.close()
-      notify(existing ? 'Work item saved' : `${ref(saved.id)} created`)
-      await refreshAfterSave()
+      const updateForm = $('#event-form')
+      if (existing && updateForm?.elements.body.value.trim()) {
+        if (!updateForm.reportValidity()) return
+        values.update = Object.fromEntries(new FormData(updateForm))
+        values.update.minutes = Number(values.update.minutes)
+      }
+      const saveButton = form.querySelector('button:not([type])')
+      const label = saveButton.textContent
+      try {
+        if (draftImages.length) {
+          const uploaded = await uploadImages(draftImages, progress => { saveButton.textContent = progress })
+          values[existing ? 'newImages' : 'images'] = uploaded
+        }
+        saveButton.textContent = 'Saving…'
+        const saved = await api(existing ? `/api/items/${item.id}` : '/api/items', existing ? 'PATCH' : 'POST', values)
+        if (form.isConnected && dialog.open) dialog.close()
+        notify(existing ? 'Work item saved' : `${ref(saved.id)} created`)
+        await refreshAfterSave()
+      } finally { saveButton.textContent = label }
     })
   })
   const eventForm = $('#event-form')
@@ -559,12 +651,19 @@ function fillDrawer(item, redraw = false) {
   if (!redraw) dialog.showModal()
 }
 async function submit(form, task) {
+  const otherForm = form.id === 'item-form' ? $('#event-form') : form.id === 'event-form' ? $('#item-form') : null
+  if (otherForm?.querySelector('button:not([type]), button[type="submit"]')?.disabled) return
   const button = form.querySelector('button:not([type]), button[type="submit"]')
+  const otherButton = otherForm?.querySelector('button:not([type]), button[type="submit"]')
   const error = form.querySelector('.form-error')
   button.disabled = true
+  if (otherButton) otherButton.disabled = true
   error.textContent = ''
   try { await task() } catch (failure) { error.textContent = failure.message }
-  finally { button.disabled = false }
+  finally {
+    button.disabled = false
+    if (otherButton) otherButton.disabled = false
+  }
 }
 function download(name, csv) {
   const link = document.createElement('a')
@@ -582,7 +681,13 @@ function setMenu(open) {
 
 async function moveBoardItem(item, status) {
   if (!item || status === item.status || movingItems.has(item.id)) return
+  const before = { ...item }
+  const account = session
   movingItems.add(item.id)
+  workspaceRequest++
+  clearTimeout(boardRefreshTimer)
+  let optimistic = false
+  let conflict = false
   try {
     if (status === 'Done' && !item.resolution.trim()) {
       const detail = await api(`/api/items/${item.id}`)
@@ -591,14 +696,29 @@ async function moveBoardItem(item, status) {
       $('#item-form').elements.resolution.focus()
       return
     }
-    await api(`/api/items/${item.id}/status`, 'PATCH', { status, version: item.version })
-    await refreshAfterSave()
+    Object.assign(item, { status, updated: new Date().toISOString() })
+    optimistic = true
+    render()
+    const saved = await api(`/api/items/${item.id}/status?summary=1`, 'PATCH', { status, version: before.version })
+    if (session !== account) return
+    Object.assign(item, saved)
+    lastWorkspace = ''
     notify(`${ref(item.id)} moved to ${status}`)
   } catch (error) {
-    if (error.status === 409) await refresh().catch(() => {})
+    if (session !== account) return
+    if (optimistic) Object.assign(item, before)
+    conflict = error.status === 409
     notify(error.message)
   } finally {
     movingItems.delete(item.id)
+    workspaceRequest++
+    if (session === account) {
+      if (optimistic) render()
+      clearTimeout(boardRefreshTimer)
+      boardRefreshTimer = setTimeout(() => {
+        if (session === account) void refresh().catch(() => {})
+      }, conflict ? 0 : 800)
+    }
   }
 }
 
@@ -607,12 +727,19 @@ function endBoardDrag() {
   draggedItem = undefined
   $('.board-card.is-dragging')?.classList.remove('is-dragging')
   clearDropTarget()
+  if (renderAfterDrag) {
+    renderAfterDrag = false
+    render()
+  }
 }
 
 const main = $('#main')
 main.addEventListener('dragstart', event => {
   const card = event.target.closest('.board-card')
-  if (!card || event.target.closest('select')) return
+  if (!card || movingItems.has(Number(card.dataset.boardItem)) || event.target.closest('select')) {
+    event.preventDefault()
+    return
+  }
   draggedItem = workspace.items.find(item => item.id === Number(card.dataset.boardItem))
   if (!draggedItem) return
   event.dataTransfer.effectAllowed = 'move'
@@ -652,13 +779,31 @@ document.addEventListener('click', async event => {
   if ('project' in button.dataset) { setMenu(false); return routeTo('work', { project: button.dataset.project }) }
   if (button.dataset.id) {
     const request = ++openRequest
+    const dialog = $('#item-dialog')
+    if (dialog.open) return
+    dialog.dataset.loadingRequest = String(request)
+    dialog.setAttribute('aria-busy', 'true')
+    dialog.innerHTML = `<div class="dialog-head"><h2 id="item-dialog-title">Loading incident…</h2><button type="button" class="icon-button" data-action="close" aria-label="Close">${icon('x')}</button></div><p class="loading" role="status">Loading details and discussion…</p>`
+    dialog.showModal()
     try {
       const item = await api(`/api/items/${button.dataset.id}`)
-      if (request === openRequest && !document.querySelector('dialog[open]')) fillDrawer(item)
-    } catch (error) { notify(error.message) }
+      if (request === openRequest && dialog.open && dialog.dataset.loadingRequest === String(request)) fillDrawer(item, true)
+    } catch (error) {
+      if (dialog.dataset.loadingRequest === String(request)) {
+        dialog.close()
+        delete dialog.dataset.loadingRequest
+        dialog.removeAttribute('aria-busy')
+      }
+      notify(error.message)
+    }
     return
   }
   switch (button.dataset.action) {
+    case 'retry-workspace':
+      button.disabled = true
+      try { await refresh() } catch (error) { notify(error.message) }
+      finally { button.disabled = false }
+      return
     case 'focus': return routeTo('work', { focus: button.dataset.focus })
     case 'clear-focus': return routeTo(view, { ...filters, focus: '' })
     case 'create': return fillDrawer({ project: filters.project })

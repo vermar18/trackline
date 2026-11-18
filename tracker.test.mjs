@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { createRequestHandler } from './server.mjs'
+import { createRequestHandler, readTicket } from './server.mjs'
 import { connectDatabase, mysqlConfig } from './database.mjs'
 import { createAuth } from './auth.mjs'
 import { encodeCSV, parseImport } from './public/csv.js'
@@ -13,6 +13,27 @@ import { encodeCSV, parseImport } from './public/csv.js'
 const admin = { username: 'qa-admin', name: 'QA Admin', password: 'temporary admin test password' }
 const mysqlTests = { skip: process.env.MYSQL_TEST === '1' ? false : 'Set MYSQL_TEST=1 with a disposable MySQL server.' }
 const run = promisify(execFile)
+
+test('ticket read uses one query and preserves timeline and attachment ordering', async () => {
+  let queries = 0
+  const ticket = await readTicket({
+    async one(sql, args) {
+      queries++
+      assert.deepEqual(args, [12])
+      assert.match(sql, /JSON_ARRAYAGG/)
+      return {
+        id: 12, title: 'Ticket details',
+        events: JSON.stringify([{ id: 1, body: 'Created' }, { id: 3, body: 'Comment' }]),
+        images: [{ id: 4, filename: 'second.png' }, { id: 2, filename: 'first.png' }],
+      }
+    },
+  }, 12)
+  assert.equal(queries, 1)
+  assert.equal(ticket.title, 'Ticket details')
+  assert.deepEqual(ticket.events.map(event => event.id), [3, 1])
+  assert.deepEqual(ticket.images.map(image => image.id), [2, 4])
+  await assert.rejects(readTicket({ one: async () => undefined }, 404), { status: 404 })
+})
 
 async function testDatabase(t) {
   const config = await mysqlConfig()
@@ -179,8 +200,19 @@ test('projects are managed centrally and board status moves preserve ticket deta
   assert.equal(moved.data.description, draft.description)
   assert.match(moved.data.events[0].body, /To do → In progress/)
   assert.equal((await app.request(path + '/status', 'PATCH', { status: 'Blocked', version: created.data.version })).status, 409)
-  assert.equal((await app.request(path + '/status', 'PATCH', { status: 'Done', version: moved.data.version })).status, 400)
-  assert.equal((await app.request(path, 'PATCH', { ...moved.data, status: 'Done', resolution: 'Verified' })).status, 200)
+  const compact = await app.request(path + '/status?summary=1', 'PATCH', { status: 'Blocked', version: moved.data.version })
+  assert.equal(compact.status, 200)
+  assert.equal(compact.data.status, 'Blocked')
+  assert.equal(compact.data.version, moved.data.version + 1)
+  assert.equal(compact.data.events, undefined)
+  assert.equal(compact.data.images, undefined)
+  assert.equal(compact.data.description, draft.description)
+  assert.equal((await app.request(path + '/status?summary=1', 'PATCH', { status: 'In review', version: moved.data.version })).status, 409)
+  const history = (await app.request(path)).data
+  assert.match(history.events[0].body, /In progress → Blocked/)
+  assert.equal((await app.request(path + '/status', 'PATCH', { status: 'Done', version: compact.data.version })).status, 400)
+  assert.equal((await app.request(path + '/status?summary=1', 'PATCH', { status: 'Done', version: compact.data.version })).status, 400)
+  assert.equal((await app.request(path, 'PATCH', { ...compact.data, status: 'Done', resolution: 'Verified' })).status, 200)
 })
 
 test('deployed HTTPS origin issues a secure same-origin session', mysqlTests, async t => {
@@ -218,5 +250,44 @@ test('creating a work item with description images stores and serves images', my
   const imgRes = await app.request(`/api/images/${imageId}`)
   assert.equal(imgRes.status, 200)
   assert.equal(imgRes.data, 'fake-png-data')
+})
+
+test('large images upload in small retryable parts and save atomically with a comment', mysqlTests, async t => {
+  const config = await testDatabase(t)
+  const app = await start(config)
+  t.after(() => app.close())
+  const db = connectDatabase(config)
+  t.after(() => db.close())
+  const created = (await app.request('/api/items', 'POST', { title: 'Upload regression', project: 'Design' })).data
+  const original = Buffer.alloc(6_000_000, 23)
+  const encoded = original.toString('base64')
+  const uploadId = randomUUID()
+  const parts = Math.ceil(encoded.length / 524288)
+  const path = '/api/items/' + created.id
+  const data = encoded.slice(0, 524288)
+  assert.equal((await app.request('/api/uploads/' + uploadId + '/0', 'PUT', { data })).status, 200)
+  assert.equal((await app.request('/api/uploads/' + uploadId + '/0', 'PUT', { data })).status, 200)
+  const payload = {
+    ...created,
+    newImages: [{ uploadId, parts, filename: 'large.png', mimeType: 'image/png' }],
+    update: { kind: 'Comment', body: 'Verified the attached invoice screenshots.' },
+  }
+  assert.equal((await app.request(path, 'PATCH', payload)).status, 400)
+  const unchanged = (await app.request(path)).data
+  assert.equal(unchanged.images.length, 0)
+  assert.equal(unchanged.events.length, 1)
+  for (let part = 1; part < parts; part++) {
+    assert.equal((await app.request('/api/uploads/' + uploadId + '/' + part, 'PUT',
+      { data: encoded.slice(part * 524288, (part + 1) * 524288) })).status, 200)
+  }
+  assert.equal((await app.request(path, 'PATCH', { ...payload, version: 0 })).status, 409)
+  const saved = await app.request(path, 'PATCH', payload)
+  assert.equal(saved.status, 200)
+  assert.equal(saved.data.images.length, 1)
+  assert.equal(saved.data.images[0].size, original.length)
+  assert.equal(saved.data.events[0].body, payload.update.body)
+  const image = await db.one('SELECT data FROM item_images WHERE item_id=?', [created.id])
+  assert.deepEqual(Buffer.from(image.data), original)
+  assert.equal((await db.one('SELECT COUNT(*) AS total FROM image_uploads')).total, 0)
 })
 
