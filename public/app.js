@@ -47,6 +47,7 @@ let draggedItem
 const movingItems = new Set()
 let boardRefreshTimer
 let renderAfterDrag = false
+let suppressBoardClick = false
 
 function staticIcons(root = document) {
   root.querySelectorAll('[data-icon]').forEach(node => { node.innerHTML = icon(node.dataset.icon) })
@@ -280,7 +281,7 @@ function board(items) {
     const cards = items.filter(item => item.status === status)
     return `<section class="board-col" data-board-status="${status}" aria-label="${status}"><header>${statusPill(status)}<b>${cards.length}</b></header>${cards.map(item => `
       <article class="board-card${movingItems.has(item.id) ? ' is-saving' : ''}" data-board-item="${item.id}" draggable="${!movingItems.has(item.id)}" aria-busy="${movingItems.has(item.id)}">
-        <button type="button" class="board-card-open" data-id="${item.id}" ${movingItems.has(item.id) ? 'disabled' : ''}><span class="board-meta">${typeIcon(item.type)}<small>${movingItems.has(item.id) ? 'Saving…' : ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
+        <button type="button" class="board-card-open" data-id="${item.id}" draggable="${!movingItems.has(item.id)}" ${movingItems.has(item.id) ? 'disabled' : ''}><span class="board-meta">${typeIcon(item.type)}<small>${movingItems.has(item.id) ? 'Saving…' : ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
         <select class="board-move" data-move-item="${item.id}" ${movingItems.has(item.id) ? 'disabled' : ''} aria-label="Move ${esc(item.title)} to another status">
           ${option('', '', 'Move to…')}${statuses.filter(next => next !== status).map(next => option(next)).join('')}
         </select>
@@ -724,6 +725,7 @@ async function moveBoardItem(item, status) {
 
 const clearDropTarget = () => $('.board-col.is-drop-target')?.classList.remove('is-drop-target')
 function endBoardDrag() {
+  if (draggedItem) suppressBoardClick = true
   draggedItem = undefined
   $('.board-card.is-dragging')?.classList.remove('is-dragging')
   clearDropTarget()
@@ -734,6 +736,14 @@ function endBoardDrag() {
 }
 
 const main = $('#main')
+main.addEventListener('pointerdown', () => { suppressBoardClick = false }, { capture: true })
+main.addEventListener('keydown', () => { suppressBoardClick = false }, { capture: true })
+main.addEventListener('click', event => {
+  // Some browsers dispatch a click on the card after a drag releases the pointer.
+  if (!suppressBoardClick || event.detail === 0 || !event.target.closest('.board')) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}, { capture: true })
 main.addEventListener('dragstart', event => {
   const card = event.target.closest('.board-card')
   if (!card || movingItems.has(Number(card.dataset.boardItem)) || event.target.closest('select')) {
@@ -742,6 +752,7 @@ main.addEventListener('dragstart', event => {
   }
   draggedItem = workspace.items.find(item => item.id === Number(card.dataset.boardItem))
   if (!draggedItem) return
+  suppressBoardClick = true
   event.dataTransfer.effectAllowed = 'move'
   event.dataTransfer.setData('text/plain', ref(draggedItem.id))
   card.classList.add('is-dragging')
@@ -765,6 +776,8 @@ main.addEventListener('drop', event => {
   const column = event.target.closest('.board-col')
   if (!column || !draggedItem) return
   event.preventDefault()
+  event.stopPropagation()
+  suppressBoardClick = true
   const item = draggedItem
   endBoardDrag()
   void moveBoardItem(item, column.dataset.boardStatus)

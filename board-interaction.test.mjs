@@ -84,3 +84,59 @@ test('Done still opens the resolution form before persisting a status', async ()
   assert.equal(state.item.status, 'To do')
   assert.equal(state.drawer.status, 'Done')
 })
+
+test('a drop changes status and suppresses the release click while the next normal click still opens the card', () => {
+  const handlers = new Map()
+  const main = { addEventListener: (type, handler) => handlers.set(type, handler) }
+  const item = { id: 1, status: 'To do' }
+  const moves = []
+  const classes = new Set()
+  const card = {
+    dataset: { boardItem: '1' },
+    classList: { add: value => classes.add(value), remove: value => classes.delete(value) },
+  }
+  const column = {
+    dataset: { boardStatus: 'In progress' },
+    classList: { contains: () => false, add() {}, remove() {} },
+  }
+  const target = {
+    closest(selector) {
+      return selector === '.board-card' ? card : selector === '.board-col' ? column : selector === '.board' ? main : null
+    },
+  }
+  const context = {
+    $: selector => selector === '#main' ? main : null,
+    workspace: { items: [item] }, movingItems: new Set(), draggedItem: undefined,
+    suppressBoardClick: false, renderAfterDrag: false,
+    ref: id => 'TL-' + id, moveBoardItem: (...args) => moves.push(args),
+  }
+  const start = source.indexOf('const clearDropTarget')
+  const end = source.indexOf("document.addEventListener('click'", start)
+  runInNewContext(source.slice(start, end), context)
+  const event = () => ({
+    target, detail: 1, prevented: false, stopped: false,
+    preventDefault() { this.prevented = true }, stopPropagation() {},
+    stopImmediatePropagation() { this.stopped = true },
+    dataTransfer: { setData() {} },
+  })
+  handlers.get('pointerdown')(event())
+  handlers.get('dragstart')(event())
+  const over = event()
+  handlers.get('dragover')(over)
+  assert.equal(over.prevented, true)
+  handlers.get('drop')(event())
+  assert.equal(moves.length, 1)
+  assert.equal(moves[0][0], item)
+  assert.equal(moves[0][1], 'In progress')
+  const releaseClick = event()
+  handlers.get('click')(releaseClick)
+  assert.equal(releaseClick.stopped, true)
+  handlers.get('pointerdown')(event())
+  const intentionalClick = event()
+  handlers.get('click')(intentionalClick)
+  assert.equal(intentionalClick.stopped, false)
+  handlers.get('keydown')(event())
+  const keyboardClick = { ...event(), detail: 0 }
+  handlers.get('click')(keyboardClick)
+  assert.equal(keyboardClick.stopped, false)
+})
