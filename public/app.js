@@ -237,7 +237,7 @@ function heading(title, description, action = '', label = '') {
 function table(items) {
   if (!items.length) return empty('No work items match this view.')
   return `<div class="table-wrap"><table class="work-table"><thead><tr><th>Work item</th><th>Project</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Due date</th></tr></thead><tbody>${items.map(item =>
-    `<tr><td><button class="item-link" data-id="${item.id}">${typeIcon(item.type)}<span>${esc(item.title)}<small>${ref(item.id)} · ${item.type}</small></span></button></td><td><span class="inline-owner"><span class="project-dot ${color(item.project)}"></span>${esc(item.project)}</span></td><td>${statusPill(item.status)}</td><td><span class="priority ${item.priority.toLowerCase()}">${item.priority}</span></td><td><span class="inline-owner">${item.owner ? avatar(item.owner) + esc(item.owner) : 'Unassigned'}</span></td><td class="${overdue(item) ? 'due-late' : ''}">${shortDate(item.due)}</td></tr>`).join('')}</tbody></table></div>`
+    `<tr><td><button class="item-link" data-id="${item.id}">${typeIcon(item.type)}<span>${esc(item.title)}<small>${ref(item.id)} · ${item.type}</small>${subtaskContext(item)}</span></button></td><td><span class="inline-owner"><span class="project-dot ${color(item.project)}"></span>${esc(item.project)}</span></td><td>${statusPill(item.status)}</td><td><span class="priority ${item.priority.toLowerCase()}">${item.priority}</span></td><td><span class="inline-owner">${item.owner ? avatar(item.owner) + esc(item.owner) : 'Unassigned'}</span></td><td class="${overdue(item) ? 'due-late' : ''}">${shortDate(item.due)}</td></tr>`).join('')}</tbody></table></div>`
 }
 function attentionRow(item) {
   const reasons = []
@@ -281,7 +281,7 @@ function board(items) {
     const cards = items.filter(item => item.status === status)
     return `<section class="board-col" data-board-status="${status}" aria-label="${status}"><header>${statusPill(status)}<b>${cards.length}</b></header>${cards.map(item => `
       <article class="board-card${movingItems.has(item.id) ? ' is-saving' : ''}" data-board-item="${item.id}" draggable="${!movingItems.has(item.id)}" aria-busy="${movingItems.has(item.id)}">
-        <button type="button" class="board-card-open" data-id="${item.id}" draggable="${!movingItems.has(item.id)}" ${movingItems.has(item.id) ? 'disabled' : ''}><span class="board-meta">${typeIcon(item.type)}<small>${movingItems.has(item.id) ? 'Saving…' : ref(item.id)}</small></span><strong>${esc(item.title)}</strong><span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
+        <button type="button" class="board-card-open" data-id="${item.id}" draggable="${!movingItems.has(item.id)}" ${movingItems.has(item.id) ? 'disabled' : ''}><span class="board-meta">${typeIcon(item.type)}<small>${movingItems.has(item.id) ? 'Saving…' : ref(item.id)}</small></span><strong>${esc(item.title)}</strong>${subtaskContext(item)}<span class="board-meta"><small>${esc(item.project)}</small>${item.owner ? avatar(item.owner) : '<small>Unassigned</small>'}</span></button>
         <select class="board-move" data-move-item="${item.id}" ${movingItems.has(item.id) ? 'disabled' : ''} aria-label="Move ${esc(item.title)} to another status">
           ${option('', '', 'Move to…')}${statuses.filter(next => next !== status).map(next => option(next)).join('')}
         </select>
@@ -387,8 +387,61 @@ function openLightbox(src, filename) {
   lightbox.showModal()
 }
 
+function subtaskContext(item) {
+  return item.parent_id ? `<span class="subtask-context">Subtask of ${ref(item.parent_id)}</span>`
+    : item.subtask_count ? `<span class="subtask-context">${item.subtask_done || 0}/${item.subtask_count} subtasks completed</span>` : ''
+}
+function subtaskPanel(item) {
+  const children = item.subtasks || []
+  const done = children.filter(child => child.status === 'Done').length
+  return `<section class="subtasks" id="subtask-panel"><div class="timeline-head"><div><h3>Subtasks</h3><small>${done} of ${children.length} completed</small></div><button type="button" class="button secondary" data-action="add-subtask">${icon('plus')} Add subtask</button></div>
+    ${children.length ? `<progress value="${done}" max="${children.length}" aria-label="Subtask completion"></progress>` : '<p class="hint">Break this item into work that can be assigned and tracked separately.</p>'}
+    ${children.map(child => {
+      const waiting = (child.dependencyIds || []).map(id => children.find(candidate => candidate.id === id)).filter(dependency => dependency && dependency.status !== 'Done')
+      return `<button type="button" class="subtask-row" data-action="edit-subtask" data-subtask-id="${child.id}"><span><strong>${ref(child.id)} · ${esc(child.title)}</strong><small>${esc(child.owner || 'Unassigned')}${child.due ? ' · Due ' + shortDate(child.due) : ''}</small>${waiting.length ? `<small class="dependency-wait">Waiting on ${waiting.map(dependency => ref(dependency.id)).join(', ')}</small>` : ''}</span>${statusPill(child.status)}</button>`
+    }).join('')}</section>`
+}
+
+async function editSubtask(parent, id) {
+  const dialog = $('#subtask-dialog')
+  try {
+    const child = id ? await api(`/api/items/${id}`) : { project: parent.project, type: 'Task', status: 'To do', priority: 'Medium', dependencyIds: [] }
+    if (!$('#item-dialog').open || $('#item-dialog').ticket !== parent || dialog.open) return
+    const members = [...new Set([...workspace.members, child.owner].filter(Boolean))]
+    dialog.innerHTML = `<form id="subtask-form"><div class="dialog-head"><div><h2 id="subtask-title">${id ? 'Edit subtask' : 'New subtask'}</h2><p>Inside ${ref(parent.id)} · ${esc(parent.title)}</p></div><button type="button" class="icon-button" data-action="close" aria-label="Close">${icon('x')}</button></div><div class="fields">
+      ${formField('Title', 'title', child.title, 'maxlength="180" required autofocus')}
+      <label>Assignee<select name="owner">${option('', child.owner || '', 'Unassigned')}${members.map(name => option(name, child.owner)).join('')}</select></label>
+      ${picker('Status', 'status', statuses, child.status)}${picker('Priority', 'priority', priorities, child.priority)}
+      ${formField('Due date', 'due', child.due, 'type="date"')}
+      <fieldset class="wide subtask-dependencies"><legend>Depends on</legend><p class="hint">Select subtasks that should finish first.</p>${(parent.subtasks || []).filter(candidate => candidate.id !== id).map(candidate => `<label><input type="checkbox" name="dependency" value="${candidate.id}" ${(child.dependencyIds || []).includes(candidate.id) ? 'checked' : ''}>${ref(candidate.id)} · ${esc(candidate.title)}</label>`).join('') || '<small>No other subtasks yet.</small>'}</fieldset>
+      <label class="wide">Description<textarea name="description" maxlength="10000">${esc(child.description)}</textarea></label>
+      <label class="wide">Resolution<textarea name="resolution" maxlength="10000">${esc(child.resolution)}</textarea></label>
+      </div><p class="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="button secondary" data-action="close">Cancel</button><button class="button primary">${id ? 'Save subtask' : 'Create subtask'}</button></div></form>`
+    const form = $('#subtask-form')
+    const resolution = () => { form.elements.resolution.required = form.elements.status.value === 'Done' }
+    form.elements.status.addEventListener('change', resolution)
+    resolution()
+    form.addEventListener('submit', async event => {
+      event.preventDefault()
+      await submit(form, async () => {
+        const values = { ...child, ...Object.fromEntries(new FormData(form)), parentId: parent.id,
+          dependencyIds: [...form.querySelectorAll('input[name="dependency"]:checked')].map(input => Number(input.value)) }
+        delete values.dependency
+        const saved = await api(id ? `/api/items/${id}` : '/api/items', id ? 'PATCH' : 'POST', values)
+        parent.subtasks = [...(parent.subtasks || []).filter(candidate => candidate.id !== saved.id), saved].sort((a, b) => a.id - b.id)
+        if ($('#item-dialog').ticket === parent) $('#subtask-panel').outerHTML = subtaskPanel(parent)
+        dialog.close()
+        notify(id ? 'Subtask saved' : 'Subtask created')
+        await refreshAfterSave()
+      })
+    })
+    dialog.showModal()
+  } catch (error) { notify(error.message) }
+}
+
 function fillDrawer(item, redraw = false) {
   const dialog = $('#item-dialog')
+  dialog.ticket = item
   delete dialog.dataset.loadingRequest
   dialog.removeAttribute('aria-busy')
   dialog.imageListeners?.abort()
@@ -414,13 +467,14 @@ function fillDrawer(item, redraw = false) {
   const projectChoices = [...new Set([...projects(), ...(existing ? [item.project] : [])])]
   const assigneeChoices = [...new Set([...workspace.members, item.owner].filter(Boolean))]
     .sort((left, right) => left.localeCompare(right))
-  dialog.innerHTML = `<div class="dialog-head"><div><h2 id="item-dialog-title">${existing ? esc(item.title) : 'New work item'}</h2><p>${existing ? ref(item.id) + ' · ' + esc(item.project) : 'Track a feature, bug, fix, or task.'}</p></div><button class="icon-button" data-action="close" aria-label="Close">${icon('x')}</button></div>
+  dialog.innerHTML = `<div class="dialog-head"><div><h2 id="item-dialog-title">${existing ? esc(item.title) : 'New work item'}</h2><p>${existing ? ref(item.id) + ' · ' + esc(item.project) + (item.parent_id ? ' · Subtask of ' + ref(item.parent_id) : '') : 'Track a feature, bug, fix, or task.'}</p></div><button class="icon-button" data-action="close" aria-label="Close">${icon('x')}</button></div>
     <form id="item-form"><div class="fields">
       ${formField('Title', 'title', item.title, 'maxlength="180" required autofocus')}
       <label>Project<select name="project" required><option value="">Select a project</option>${projectChoices.map(name => option(name, item.project)).join('')}</select>
       ${projectChoices.length ? '' : '<small>Ask a super admin to create a project first.</small>'}</label>
       ${picker('Type', 'type', types, item.type || 'Task')}
       <label>Assignee<select name="owner">${option('', item.owner || '', 'Unassigned')}${assigneeChoices.map(name => option(name, item.owner)).join('')}</select></label>
+      ${item.parent_id ? '' : formField('Team', 'team', item.team, 'maxlength="100"')}
       ${picker('Status', 'status', statuses, item.status || 'To do')}
       ${picker('Priority', 'priority', priorities, item.priority || 'Medium')}
       ${formField('Due date', 'due', item.due, 'type="date"')}
@@ -440,7 +494,7 @@ function fillDrawer(item, redraw = false) {
       </div>
       <label class="wide">Resolution<textarea name="resolution" maxlength="10000" placeholder="Record what changed and how it was verified">${esc(item.resolution)}</textarea></label>
     </div><p class="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="button secondary" data-action="close">${existing ? 'Close' : 'Cancel'}</button><button class="button primary">${existing ? 'Save changes' : 'Create item'}</button></div></form>
-    ${existing ? timeline(item) : ''}`
+    ${existing ? subtaskPanel(item) + timeline(item) : ''}`
   const form = $('#item-form')
 
   const renderImages = () => {
@@ -597,6 +651,7 @@ function fillDrawer(item, redraw = false) {
     event.preventDefault()
     const values = Object.fromEntries(new FormData(form))
     if (existing) {
+      if (item.parent_id) values.team = item.team || ''
       values.version = item.version
       if (removedImageIds.length) {
         values.removedImageIds = removedImageIds
@@ -812,6 +867,8 @@ document.addEventListener('click', async event => {
     return
   }
   switch (button.dataset.action) {
+    case 'add-subtask': return editSubtask($('#item-dialog').ticket)
+    case 'edit-subtask': return editSubtask($('#item-dialog').ticket, Number(button.dataset.subtaskId))
     case 'retry-workspace':
       button.disabled = true
       try { await refresh() } catch (error) { notify(error.message) }

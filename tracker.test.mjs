@@ -88,6 +88,52 @@ async function start(config, { seed = true, signIn = true, publicOrigin, project
   } }
 }
 
+test('subtasks preserve assignment, dependencies and independent progress', mysqlTests, async t => {
+  const config = await testDatabase(t)
+  const app = await start(config)
+  t.after(() => app.close())
+  const create = async value => app.request('/api/items', 'POST', { project: 'Billing', ...value })
+  const parent = (await create({ title: 'Release integration' })).data
+  const a = (await create({ title: 'Backend endpoint', parentId: parent.id, owner: 'QA Admin', team: 'Backend', due: '2026-12-01' })).data
+  const b = (await create({ title: 'UI integration', parentId: parent.id, team: 'Frontend', dependencyIds: [a.id] })).data
+  assert.equal(b.parent_id, parent.id)
+  assert.deepEqual(b.dependencyIds, [a.id])
+  const path = id => '/api/items/' + id
+  let detail = (await app.request(path(parent.id))).data
+  assert.equal(detail.subtasks.length, 2)
+  assert.equal(detail.subtasks[0].team, 'Backend')
+  assert.equal(detail.subtasks[0].owner, 'QA Admin')
+  assert.deepEqual(detail.subtasks[1].dependencyIds, [a.id])
+  assert.equal((await app.request(path(a.id), 'PATCH', { ...a, dependencyIds: [b.id] })).status, 400)
+  assert.equal((await app.request(path(a.id), 'PATCH', { ...a, dependencyIds: [a.id] })).status, 400)
+  const other = (await create({ title: 'Other release' })).data
+  const foreign = (await create({ title: 'Other task', parentId: other.id })).data
+  assert.equal((await app.request(path(a.id), 'PATCH', { ...a, dependencyIds: [foreign.id] })).status, 400)
+  assert.equal((await create({ title: 'Bad dependency', parentId: parent.id, dependencyIds: [999999] })).status, 400)
+  assert.equal((await create({ title: 'Missing parent', parentId: 999999 })).status, 404)
+  const completed = await app.request(path(a.id), 'PATCH', { ...a, status: 'Done', resolution: 'API verified' })
+  assert.equal(completed.status, 200)
+  assert.equal((await app.request(path(a.id), 'PATCH', { ...a, team: 'Updated' })).status, 409)
+  detail = (await app.request(path(parent.id))).data
+  assert.equal(detail.subtasks[0].status, 'Done')
+  assert.equal(detail.status, 'To do')
+  assert.equal(detail.version, parent.version)
+  const workspace = (await app.request('/api/workspace')).data
+  const summary = workspace.items.find(item => item.id === parent.id)
+  assert.equal(summary.subtask_count, 2)
+  assert.equal(summary.subtask_done, 1)
+  assert.equal(workspace.items.find(item => item.id === b.id).parent_id, parent.id)
+  const saved = await app.request(path(b.id), 'PATCH', { ...b, dependencyIds: [], owner: 'QA Admin' })
+  assert.equal(saved.status, 200)
+  assert.deepEqual(saved.data.dependencyIds, [])
+  assert.match(saved.data.events[0].body, /dependencies/)
+  const racingDependencies = await Promise.all([
+    app.request(path(a.id), 'PATCH', { ...completed.data, dependencyIds: [b.id] }),
+    app.request(path(b.id), 'PATCH', { ...saved.data, dependencyIds: [a.id] }),
+  ])
+  assert.deepEqual(racingDependencies.map(result => result.status).sort(), [200, 400])
+})
+
 test('an issue preserves discussion, time, resolution and history across restart', mysqlTests, async t => {
   const config = await testDatabase(t)
   let app = await start(config)

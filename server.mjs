@@ -8,7 +8,7 @@ import { connectDatabase, mysqlConfig } from './database.mjs'
 const statuses = ['To do', 'In progress', 'Blocked', 'In review', 'Done']
 const types = ['Feature', 'Bug', 'Fix', 'Task']
 const priorities = ['Low', 'Medium', 'High', 'Urgent']
-const columns = ['title', 'type', 'project', 'owner', 'status', 'priority', 'due', 'description', 'resolution']
+const columns = ['title', 'type', 'project', 'owner', 'status', 'priority', 'due', 'description', 'resolution', 'team']
 const assets = new Map([
   ['/', ['index.html', 'text/html']],
   ['/styles.css', ['styles.css', 'text/css']],
@@ -29,6 +29,7 @@ function field(value, max = 10000) {
 function itemFields(value) {
   if (!value || typeof value !== 'object') bad('Expected a work item.')
   const item = Object.fromEntries(columns.map(key => [key, field(value[key], ['description', 'resolution'].includes(key) ? 10000 : 180)]))
+  if (item.team.length > 100) bad('Use a team name of up to 100 characters.')
   if (!item.title || !item.project) bad('Title and project are required.')
   item.type ||= 'Task'
   item.priority ||= 'Medium'
@@ -123,14 +124,27 @@ export async function readTicket(db, id) {
       (SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
         'id', item_images.id, 'item_id', item_images.item_id, 'filename', item_images.filename,
         'mime_type', item_images.mime_type, 'size', item_images.size, 'created', item_images.created
-      )), JSON_ARRAY()) FROM item_images WHERE item_images.item_id=items.id) AS images
+      )), JSON_ARRAY()) FROM item_images WHERE item_images.item_id=items.id) AS images,
+      (SELECT COALESCE(JSON_ARRAYAGG(depends_on_id), JSON_ARRAY())
+        FROM item_dependencies WHERE item_id=items.id) AS dependencyIds,
+      (SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+        'id', child.id, 'parent_id', child.parent_id, 'title', child.title,
+        'project', child.project, 'owner', child.owner, 'team', child.team,
+        'status', child.status, 'priority', child.priority, 'due', child.due,
+        'version', child.version, 'updated', child.updated,
+        'dependencyIds', (SELECT COALESCE(JSON_ARRAYAGG(depends_on_id), JSON_ARRAY())
+          FROM item_dependencies WHERE item_id=child.id)
+      )), JSON_ARRAY()) FROM items child WHERE child.parent_id=items.id) AS subtasks
     FROM items WHERE items.id=?`, [id])
   if (!ticket) bad('Work item not found.', 404)
-  for (const key of ['events', 'images']) {
+  for (const key of ['events', 'images', 'dependencyIds', 'subtasks']) {
     if (typeof ticket[key] === 'string') ticket[key] = JSON.parse(ticket[key])
+    ticket[key] ||= []
   }
   ticket.events.sort((left, right) => right.id - left.id)
   ticket.images.sort((left, right) => left.id - right.id)
+  ticket.subtasks.sort((left, right) => left.id - right.id)
+  ticket.dependencyIds.sort((left, right) => left - right)
   return ticket
 }
 
@@ -148,11 +162,38 @@ export function createRequestHandler(db, { origin } = {}) {
   }
   const get = async (connection, id, lock = false) =>
     (await connection.one('SELECT * FROM items WHERE id=?' + (lock ? ' FOR UPDATE' : ''), [id])) ?? bad('Work item not found.', 404)
-  const detail = async (connection, id) => ({
-    ...await get(connection, id),
-    events: await connection.query('SELECT * FROM events WHERE item_id=? ORDER BY id DESC', [id]),
-    images: await connection.query('SELECT id, item_id, filename, mime_type, size, created FROM item_images WHERE item_id=? ORDER BY id ASC', [id]),
-  })
+  const detail = (connection, id) => readTicket(connection, id)
+  const dependencyIds = value => {
+    if (!Array.isArray(value) || value.length > 100 ||
+      value.some(id => !Number.isSafeInteger(id) || id < 1 || id > 4294967295)) bad('Choose valid subtask dependencies.')
+    return [...new Set(value)].sort((left, right) => left - right)
+  }
+  const saveDependencies = async (connection, id, parentId, input) => {
+    const ids = dependencyIds(input)
+    if (!parentId && ids.length) bad('Dependencies can be linked between subtasks inside the same item.')
+    if (ids.includes(id)) bad('A subtask cannot depend on itself.')
+    const siblings = parentId ? await connection.query('SELECT id FROM items WHERE parent_id=? FOR UPDATE', [parentId]) : []
+    if (ids.some(dependency => !siblings.some(sibling => sibling.id === dependency))) {
+      bad('Choose dependencies from subtasks inside this item.')
+    }
+    const edges = parentId ? await connection.query('SELECT item_id,depends_on_id FROM item_dependencies JOIN items ON items.id=item_id WHERE items.parent_id=? FOR UPDATE', [parentId]) : []
+    const current = edges.filter(edge => edge.item_id === id).map(edge => edge.depends_on_id).sort((a, b) => a - b)
+    if (JSON.stringify(current) === JSON.stringify(ids)) return false
+    const graph = new Map(siblings.map(sibling => [sibling.id, []]))
+    for (const edge of edges) if (edge.item_id !== id) graph.get(edge.item_id)?.push(edge.depends_on_id)
+    const queue = [...ids]
+    const visited = new Set()
+    while (queue.length) {
+      const next = queue.pop()
+      if (next === id) bad('These dependencies would create a cycle.')
+      if (visited.has(next)) continue
+      visited.add(next)
+      queue.push(...(graph.get(next) || []))
+    }
+    await connection.execute('DELETE FROM item_dependencies WHERE item_id=?', [id])
+    if (ids.length) await connection.execute('INSERT INTO item_dependencies(item_id,depends_on_id) VALUES ' + ids.map(() => '(?,?)').join(','), ids.flatMap(dependency => [id, dependency]))
+    return true
+  }
   const auth = createAuth(db, { origin })
   return async (request, response) => {
     const send = (status, data) => {
@@ -259,7 +300,7 @@ export function createRequestHandler(db, { origin } = {}) {
       }
       if (method === 'GET' && pathname === '/api/workspace') {
         const [items, activity, members, projects] = await Promise.all([
-          db.query('SELECT * FROM items ORDER BY updated DESC,id DESC'),
+          db.query('SELECT items.*, (SELECT COUNT(*) FROM items child WHERE child.parent_id=items.id) AS subtask_count, (SELECT COUNT(*) FROM items child WHERE child.parent_id=items.id AND child.status=\'Done\') AS subtask_done FROM items ORDER BY updated DESC,id DESC'),
           db.query('SELECT events.*, items.title FROM events JOIN items ON items.id=events.item_id ORDER BY at DESC, events.id DESC LIMIT 100'),
           auth.members(),
           db.query('SELECT name FROM projects ORDER BY name'),
@@ -269,10 +310,18 @@ export function createRequestHandler(db, { origin } = {}) {
       if (method === 'POST' && pathname === '/api/items') {
         const item = itemFields(value)
         return send(201, await db.transaction(async connection => {
+          if (value.parentId != null) {
+            if (!Number.isSafeInteger(value.parentId) || value.parentId < 1 || value.parentId > 4294967295) bad('Choose a valid parent item.')
+            const parent = await get(connection, value.parentId, true)
+            item.parent_id = parent.id
+            item.project = parent.project
+          }
           const images = await resolveImages(connection, value?.images, user.username)
           item.project = await requireProject(connection, item.project)
           const at = now()
           const id = await add(connection, item, actor, 'Created', at)
+          await saveDependencies(connection, id, item.parent_id, value.dependencyIds ?? [])
+          if (item.parent_id) await log(connection, item.parent_id, 'Updated', actor, `Created subtask TL-${String(id).padStart(3, '0')}: ${item.title}`, 0, at)
           if (images.length) await saveImages(connection, id, images, at)
           return detail(connection, id)
         }))
@@ -330,6 +379,10 @@ export function createRequestHandler(db, { origin } = {}) {
       }
       if (method === 'PATCH' && match[2] !== '/events') {
         return send(200, await db.transaction(async connection => {
+          if (value?.dependencyIds !== undefined) {
+            const preview = await get(connection, id)
+            if (preview.parent_id) await get(connection, preview.parent_id, true)
+          }
           const current = await get(connection, id, true)
           if (value?.version !== current.version) bad('This item changed since you opened it. Refresh or reopen it before trying again.', 409)
           const statusOnly = match[2] === '/status'
@@ -342,6 +395,8 @@ export function createRequestHandler(db, { origin } = {}) {
             bad('Add a comment or a work log with 1 to 1,440 minutes.')
           }
           if (item.project !== current.project) item.project = await requireProject(connection, item.project)
+          const dependenciesChanged = !statusOnly && value.dependencyIds !== undefined
+            ? await saveDependencies(connection, id, current.parent_id, value.dependencyIds) : false
           const changed = columns.filter(key => current[key] !== item[key])
           let imagesChanged = false
           if (!statusOnly && Array.isArray(value?.removedImageIds) && value.removedImageIds.length) {
@@ -358,12 +413,13 @@ export function createRequestHandler(db, { origin } = {}) {
             await saveImages(connection, id, newImages, now())
             imagesChanged = true
           }
-          if (changed.length) {
+          if (changed.length || dependenciesChanged) {
             const changes = changed.map(key => {
               const label = key[0].toUpperCase() + key.slice(1)
               return `${label}: ${current[key] || '—'} → ${item[key] || '—'}`
             })
             if (imagesChanged) changes.push('Images: updated description images')
+            if (dependenciesChanged) changes.push('Updated subtask dependencies')
             await connection.execute(`UPDATE items SET ${columns.map(key => `${key}=?`).join(',')},updated=?,version=version+1 WHERE id=?`,
               [...columns.map(key => item[key]), now(), id])
             await log(connection, id, 'Updated', actor, changes.join('\n'))

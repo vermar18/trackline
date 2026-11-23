@@ -2,6 +2,12 @@
 
 Trackline is a shared workspace for tracking features, fixes, bugs, and other project actions. Its Node.js 24 backend uses Prisma Client and Prisma Migrate with MySQL 8.4. The same application serves the web interface and the API.
 
+Open a saved item and use **Subtasks → Add subtask** to split work across assignees. Each subtask has its own status, priority, due date, description, resolution, and activity history. Click a subtask inside its parent to edit it. Subtasks also appear in All work and on the board, labelled with their parent reference; parents show completion counts.
+
+Use **Depends on** to link subtasks inside the same parent. Unfinished dependencies appear as “Waiting on” references. Self-dependencies and cycles are rejected. Dependencies provide visibility; statuses and parent completion remain under the team's control. Assignee selects an existing workspace member.
+
+Existing installations must apply `npm run db:deploy` before deploying the subtask-enabled app. Migration `20261124000100_subtasks` adds the parent link, team label, and dependency table while preserving existing tickets.
+
 ## Prepare MySQL and create the super admin
 
 Create a dedicated empty MySQL schema, such as `trackline`, on your existing AWS database or another MySQL server. A fresh Trackline schema has no sample tickets. Give the migration account permission to create and change tables in that schema. Use a restricted account with SELECT, INSERT, UPDATE and DELETE on the Trackline tables for the running app.

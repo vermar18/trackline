@@ -37,6 +37,8 @@ model Item {
   type        String @db.VarChar(16)
   project     String @db.VarChar(180)
   owner       String @db.VarChar(180)
+  team        String @default("") @db.VarChar(100)
+  parent_id   Int?   @db.UnsignedInt
   status      String @db.VarChar(16)
   priority    String @db.VarChar(16)
   due         String @db.VarChar(10)
@@ -47,9 +49,25 @@ model Item {
   version     Int         @default(1) @db.UnsignedInt
   events      Event[]
   images      ItemImage[]
+  parent      Item? @relation("Subtasks", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "items_parent_fk")
+  subtasks    Item[] @relation("Subtasks")
+  dependencies ItemDependency[] @relation("DependentItem")
+  dependents   ItemDependency[] @relation("RequiredItem")
 
+  @@index([parent_id, id], map: "items_parent")
   @@index([updated, id], map: "items_updated")
   @@map("items")
+}
+
+model ItemDependency {
+  item_id       Int @db.UnsignedInt
+  depends_on_id Int @db.UnsignedInt
+  item          Item @relation("DependentItem", fields: [item_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "dependency_item_fk")
+  depends_on    Item @relation("RequiredItem", fields: [depends_on_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "dependency_required_fk")
+
+  @@id([item_id, depends_on_id])
+  @@index([depends_on_id], map: "dependency_required")
+  @@map("item_dependencies")
 }
 
 model ItemImage {
