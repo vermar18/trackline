@@ -14,6 +14,7 @@ const assets = new Map([
   ['/styles.css', ['styles.css', 'text/css']],
   ['/app.js', ['app.js', 'text/javascript']],
   ['/csv.js', ['csv.js', 'text/javascript']],
+  ['/links.js', ['links.js', 'text/javascript']],
 ])
 
 function bad(message, status = 400) {
@@ -26,6 +27,12 @@ function field(value, max = 10000) {
   return value.trim()
 }
 
+export function requireResolution(status, resolution) {
+  if (['In review', 'Done'].includes(status) && !resolution.trim()) {
+    bad(status === 'In review' ? 'Add a resolution before moving this item into review.' : 'Add a resolution before marking this item done.')
+  }
+}
+
 function itemFields(value) {
   if (!value || typeof value !== 'object') bad('Expected a work item.')
   const item = Object.fromEntries(columns.map(key => [key, field(value[key], ['description', 'resolution'].includes(key) ? 10000 : 180)]))
@@ -36,7 +43,7 @@ function itemFields(value) {
   item.status ||= 'To do'
   if (!types.includes(item.type) || !priorities.includes(item.priority) || !statuses.includes(item.status)) bad('Unknown type, priority, or status.')
   if (item.due && (!/^\d{4}-\d{2}-\d{2}$/.test(item.due) || Number.isNaN(Date.parse(item.due)) || new Date(item.due).toISOString().slice(0, 10) !== item.due)) bad('Enter a valid due date in YYYY-MM-DD format.')
-  if (item.status === 'Done' && !item.resolution) bad('Add a resolution before marking this item done.')
+  requireResolution(item.status, item.resolution)
   return item
 }
 
@@ -369,7 +376,7 @@ export function createRequestHandler(db, { origin } = {}) {
           const current = await get(connection, id, true)
           if (value?.version !== current.version) bad('This item changed since you opened it. Refresh or reopen it before trying again.', 409)
           if (!statuses.includes(value.status)) bad('Choose a valid status.')
-          if (value.status === 'Done' && !current.resolution.trim()) bad('Add a resolution before marking this item done.')
+          requireResolution(value.status, current.resolution)
           if (value.status === current.status) return current
           const updated = now()
           await connection.execute('UPDATE items SET status=?,updated=?,version=version+1 WHERE id=?', [value.status, updated, id])
@@ -387,7 +394,7 @@ export function createRequestHandler(db, { origin } = {}) {
           if (value?.version !== current.version) bad('This item changed since you opened it. Refresh or reopen it before trying again.', 409)
           const statusOnly = match[2] === '/status'
           if (statusOnly && !statuses.includes(value.status)) bad('Choose a valid status.')
-          if (statusOnly && value.status === 'Done' && !current.resolution.trim()) bad('Add a resolution before marking this item done.')
+          if (statusOnly) requireResolution(value.status, current.resolution)
           const item = statusOnly ? { ...current, status: value.status } : itemFields(value)
           const update = !statusOnly && value.update
           if (update && (!['Comment', 'Work log'].includes(update.kind) || !field(update.body) ||

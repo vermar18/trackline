@@ -2,6 +2,10 @@
 
 Trackline is a shared workspace for tracking features, fixes, bugs, and other project actions. Its Node.js 24 backend uses Prisma Client and Prisma Migrate with MySQL 8.4. The same application serves the web interface and the API.
 
+Paste `https://`, `http://`, or `www.` links into descriptions and comments. Descriptions and comment drafts show a live clickable preview; posted comments keep their links clickable. Links open in a new tab. Text remains editable as plain text, and pasted HTML is displayed safely as text.
+
+A resolution is required for **In review** and **Done**, including subtasks. Moving a board card to either status without a resolution opens the item editor so you can enter one before saving.
+
 Open a saved item and use **Subtasks → Add subtask** to split work across assignees. Each subtask has its own status, priority, due date, description, resolution, and activity history. Click a subtask inside its parent to edit it. Subtasks also appear in All work and on the board, labelled with their parent reference; parents show completion counts.
 
 Use **Depends on** to link subtasks inside the same parent. Unfinished dependencies appear as “Waiting on” references. Self-dependencies and cycles are rejected. Dependencies provide visibility; statuses and parent completion remain under the team's control. Assignee selects an existing workspace member.

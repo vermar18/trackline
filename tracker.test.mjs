@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { createRequestHandler, readTicket } from './server.mjs'
+import { createRequestHandler, readTicket, requireResolution } from './server.mjs'
 import { connectDatabase, mysqlConfig } from './database.mjs'
 import { createAuth } from './auth.mjs'
 import { encodeCSV, parseImport } from './public/csv.js'
@@ -13,6 +13,14 @@ import { encodeCSV, parseImport } from './public/csv.js'
 const admin = { username: 'qa-admin', name: 'QA Admin', password: 'temporary admin test password' }
 const mysqlTests = { skip: process.env.MYSQL_TEST === '1' ? false : 'Set MYSQL_TEST=1 with a disposable MySQL server.' }
 const run = promisify(execFile)
+
+test('review and completion require a nonblank resolution; earlier statuses do not', () => {
+  for (const status of ['In review', 'Done']) {
+    for (const resolution of ['', '  \n\t']) assert.throws(() => requireResolution(status, resolution), { status: 400 })
+    assert.doesNotThrow(() => requireResolution(status, 'Verified the fix'))
+  }
+  for (const status of ['To do', 'In progress', 'Blocked']) assert.doesNotThrow(() => requireResolution(status, ''))
+})
 
 test('ticket read uses one query and preserves timeline and attachment ordering', async () => {
   let queries = 0
@@ -258,7 +266,13 @@ test('projects are managed centrally and board status moves preserve ticket deta
   assert.match(history.events[0].body, /In progress → Blocked/)
   assert.equal((await app.request(path + '/status', 'PATCH', { status: 'Done', version: compact.data.version })).status, 400)
   assert.equal((await app.request(path + '/status?summary=1', 'PATCH', { status: 'Done', version: compact.data.version })).status, 400)
-  assert.equal((await app.request(path, 'PATCH', { ...compact.data, status: 'Done', resolution: 'Verified' })).status, 200)
+  assert.equal((await app.request(path + '/status', 'PATCH', { status: 'In review', version: compact.data.version })).status, 400)
+  assert.equal((await app.request(path + '/status?summary=1', 'PATCH', { status: 'In review', version: compact.data.version })).status, 400)
+  assert.equal((await app.request(path, 'PATCH', { ...compact.data, status: 'In review', resolution: '   ' })).status, 400)
+  const reviewed = await app.request(path, 'PATCH', { ...compact.data, status: 'In review', resolution: 'Ready for verification' })
+  assert.equal(reviewed.status, 200)
+  assert.equal(reviewed.data.status, 'In review')
+  assert.equal((await app.request(path, 'PATCH', { ...reviewed.data, status: 'Done', resolution: 'Verified' })).status, 200)
 })
 
 test('deployed HTTPS origin issues a secure same-origin session', mysqlTests, async t => {

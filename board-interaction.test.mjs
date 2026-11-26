@@ -65,6 +65,7 @@ test('a poll started before a board save cannot overwrite the confirmed move', a
   const poll = deferred()
   const save = deferred()
   const state = boardState(path => path === '/api/workspace' ? poll.promise : save.promise)
+  state.item.resolution = 'Implementation verified'
   const oldItem = { ...state.item }
   const refreshing = state.refresh()
   const moving = state.moveBoardItem(state.item, 'In review')
@@ -76,13 +77,13 @@ test('a poll started before a board save cannot overwrite the confirmed move', a
   assert.equal(state.workspace.items[0].version, 2)
 })
 
-test('Done still opens the resolution form before persisting a status', async () => {
+for (const status of ['In review', 'Done']) test(`${status} opens the resolution form before persisting a status`, async () => {
   const calls = []
   const state = boardState(async path => { calls.push(path); return { id: 1, status: 'To do' } })
-  await state.moveBoardItem(state.item, 'Done')
+  await state.moveBoardItem(state.item, status)
   assert.deepEqual(calls, ['/api/items/1'])
   assert.equal(state.item.status, 'To do')
-  assert.equal(state.drawer.status, 'Done')
+  assert.equal(state.drawer.status, status)
 })
 
 test('a drop changes status and suppresses the release click while the next normal click still opens the card', () => {

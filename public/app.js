@@ -1,4 +1,5 @@
 import { parseImport, encodeCSV } from './csv.js'
+import { linkedText, bindLinkPreviews } from './links.js'
 
 const icons = {
   layers: '<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>',
@@ -356,7 +357,7 @@ function timeline(item) {
   return `<section class="timeline"><div class="timeline-head"><h3>Discussion & activity</h3><span>${minutes} min logged</span></div>
     <form class="event-form" id="event-form"><div class="event-controls"><label>Update type<select name="kind"><option>Comment</option><option>Work log</option></select></label><label id="minutes-label" hidden>Minutes<input type="number" name="minutes" min="1" max="1440"></label></div>
     <label>Update<textarea name="body" maxlength="10000" required placeholder="Share findings, decisions, or the work you completed"></textarea></label><div><button class="button secondary">Post update</button></div><p class="form-error" role="alert"></p></form>
-    ${item.events.map(event => `<article class="event">${avatar(event.actor)}<div><b>${esc(event.actor)} · ${esc(event.kind)}${event.minutes ? ` · ${event.minutes} min` : ''}</b><time datetime="${esc(event.at)}">${timestamp(event.at)}</time><p>${esc(event.body)}</p></div></article>`).join('')}</section>`
+    ${item.events.map(event => `<article class="event">${avatar(event.actor)}<div><b>${esc(event.actor)} · ${esc(event.kind)}${event.minutes ? ` · ${event.minutes} min` : ''}</b><time datetime="${esc(event.at)}">${timestamp(event.at)}</time><p class="linked-text">${linkedText(event.body)}</p></div></article>`).join('')}</section>`
 }
 function formatBytes(bytes) {
   if (!bytes || bytes <= 0) return '0 B'
@@ -418,7 +419,8 @@ async function editSubtask(parent, id) {
       <label class="wide">Resolution<textarea name="resolution" maxlength="10000">${esc(child.resolution)}</textarea></label>
       </div><p class="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="button secondary" data-action="close">Cancel</button><button class="button primary">${id ? 'Save subtask' : 'Create subtask'}</button></div></form>`
     const form = $('#subtask-form')
-    const resolution = () => { form.elements.resolution.required = form.elements.status.value === 'Done' }
+    bindLinkPreviews(form)
+    const resolution = () => { form.elements.resolution.required = ['In review', 'Done'].includes(form.elements.status.value) }
     form.elements.status.addEventListener('change', resolution)
     resolution()
     form.addEventListener('submit', async event => {
@@ -496,6 +498,7 @@ function fillDrawer(item, redraw = false) {
     </div><p class="form-error" role="alert"></p><div class="dialog-foot"><button type="button" class="button secondary" data-action="close">${existing ? 'Close' : 'Cancel'}</button><button class="button primary">${existing ? 'Save changes' : 'Create item'}</button></div></form>
     ${existing ? subtaskPanel(item) + timeline(item) : ''}`
   const form = $('#item-form')
+  bindLinkPreviews(dialog)
 
   const renderImages = () => {
     const listEl = $('#desc-images-list')
@@ -644,7 +647,7 @@ function fillDrawer(item, redraw = false) {
     draftImages.forEach(img => { if (img.previewUrl) URL.revokeObjectURL(img.previewUrl) })
   }, { once: true, signal: imageListeners.signal })
 
-  const setResolution = () => { form.elements.resolution.required = form.elements.status.value === 'Done' }
+  const setResolution = () => { form.elements.resolution.required = ['In review', 'Done'].includes(form.elements.status.value) }
   form.elements.status.addEventListener('change', setResolution)
   setResolution()
   form.addEventListener('submit', async event => {
@@ -696,6 +699,7 @@ function fillDrawer(item, redraw = false) {
           const draft = Object.fromEntries(new FormData(form))
           fillDrawer({ ...item, events: saved.events, images: savedImages, _draftImages: draftImages, _removedImageIds: removedImageIds }, true)
           for (const [key, value] of Object.entries(draft)) $('#item-form').elements[key].value = value
+          $('#item-form').elements.description.dispatchEvent(new Event('input'))
           $('#item-form').elements.status.dispatchEvent(new Event('change'))
           $('#event-form').elements.body.focus()
         }
@@ -745,10 +749,10 @@ async function moveBoardItem(item, status) {
   let optimistic = false
   let conflict = false
   try {
-    if (status === 'Done' && !item.resolution.trim()) {
+    if (['In review', 'Done'].includes(status) && !item.resolution.trim()) {
       const detail = await api(`/api/items/${item.id}`)
       if (view !== 'board' || document.querySelector('dialog[open]')) return
-      fillDrawer({ ...detail, status: 'Done' })
+      fillDrawer({ ...detail, status })
       $('#item-form').elements.resolution.focus()
       return
     }
